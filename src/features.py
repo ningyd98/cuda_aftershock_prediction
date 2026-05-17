@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
+from src.utils import haversine_km, seismic_moment_from_mw
+
 
 def _round_to_bin(values: np.ndarray, bin_width: float) -> np.ndarray:
     """将震级归入指定精度的 bin，减少浮点误差对统计结果的影响。"""
@@ -289,6 +291,213 @@ def calculate_spatial_anisotropy(
     }
 
 
+def calculate_temporal_binned_features(
+    events: pd.DataFrame,
+    mainshock_time,
+    time_col: str = "time",
+    mag_col: str = "mag",
+    bins_hours: Sequence[float] = (1.0, 6.0, 12.0, 24.0, 72.0),
+    min_events: int = 1,
+) -> dict:
+    """
+    计算主震后多个时间窗口内的余震频次与累积能量分布。
+
+    对应 project_plan 第 3.2 节"时空演化特征"：
+    震后 1h/6h/12h/24h/72h 内的余震发生频次、累积释放能量。
+
+    返回 dict，每个时间窗产出 count_{h}h 和 energy_{h}h。
+    """
+    result: dict = {}
+    if events.empty or time_col not in events.columns:
+        for h in bins_hours:
+            result[f"count_{h:.0f}h"] = 0
+            result[f"energy_{h:.0f}h"] = 0.0
+        return result
+
+    times = pd.to_datetime(events[time_col], utc=True, errors="coerce")
+    mainshock_time = pd.to_datetime(mainshock_time, utc=True)
+    hours_elapsed = (times - mainshock_time).dt.total_seconds() / 3600.0
+
+    mags = events[mag_col].astype(float).to_numpy() if mag_col in events.columns else np.zeros(len(events))
+
+    for h in sorted(bins_hours):
+        in_window = (hours_elapsed > 0) & (hours_elapsed <= h)
+        count = int(in_window.sum())
+        energy = float(seismic_moment_from_mw(mags[in_window]).sum()) if count > 0 else 0.0
+        result[f"count_{h:.0f}h"] = count
+        result[f"energy_{h:.0f}h"] = energy
+    return result
+
+
+def _empty_etas_result(n_events: int) -> dict:
+    """返回统一格式的 ETAS 空结果。"""
+    return {
+        "etas_mu": np.nan,
+        "etas_K0": np.nan,
+        "etas_alpha": np.nan,
+        "etas_c": np.nan,
+        "etas_p": np.nan,
+        "etas_nll": np.nan,
+        "etas_n": int(n_events),
+        "etas_valid": False,
+    }
+
+
+def estimate_etas_parameters(
+    events: pd.DataFrame,
+    mainshock_time,
+    time_col: str = "time",
+    mag_col: str = "mag",
+    obs_days: float = 3.0,
+    min_events: int = 10,
+    max_events: int = 500,
+    mc: float = 2.5,
+    bin_width: float = 0.1,
+) -> dict:
+    """
+    简化 ETAS (Epidemic Type Aftershock Sequence) 模型参数估计 (优化版)。
+
+    对于超过 max_events 的序列做随机下采样以控制拟合时间。
+    """
+    if events.empty or time_col not in events.columns:
+        return _empty_etas_result(0)
+
+    times = pd.to_datetime(events[time_col], utc=True, errors="coerce")
+    mainshock_time = pd.to_datetime(mainshock_time, utc=True)
+    elapsed_days = (times - mainshock_time).dt.total_seconds().to_numpy() / 86400.0
+    elapsed_days = elapsed_days[np.isfinite(elapsed_days)]
+    elapsed_days = elapsed_days[(elapsed_days > 0) & (elapsed_days <= obs_days)]
+
+    if len(elapsed_days) < min_events:
+        return _empty_etas_result(len(elapsed_days))
+
+    n_events = len(elapsed_days)
+
+    # 下采样：大序列截断到 max_events
+    if n_events > max_events:
+        rng = np.random.RandomState(42 + n_events)
+        keep_idx = rng.choice(n_events, size=max_events, replace=False)
+        elapsed_days = elapsed_days[keep_idx]
+        n_events = max_events
+
+    mags = events[mag_col].dropna().astype(float).to_numpy()
+    mags_in_window = mags[np.isfinite(mags)]
+    mags_in_window = mags_in_window[
+        (pd.to_datetime(events[time_col], utc=True, errors="coerce") > mainshock_time)
+        & (pd.to_datetime(events[time_col], utc=True, errors="coerce") <= mainshock_time + pd.Timedelta(days=obs_days))
+    ]
+
+    if len(mags_in_window) < min_events:
+        return _empty_etas_result(n_events)
+
+    # Step 1: 估计 b 值
+    gr_result = estimate_gr_b_value(
+        events[events[time_col].notna()].assign(mag=mags),
+        mag_col="mag",
+        mc=mc,
+        bin_width=bin_width,
+        min_events=min_events,
+    )
+    if not gr_result["gr_valid"]:
+        return _empty_etas_result(n_events)
+
+    b_value = gr_result["gr_b_value"]
+    beta = b_value * np.log(10)
+
+    # Step 2: 简化 ETAS — 固定 Omori 参数，仅估计 μ, K0, α
+    # 强度函数: λ(t,m) = μ + Σ K0 * exp(α*(Mi-Mc)) / (t-ti + c)^p
+    # 简化为仅用主震贡献: λ(t) ≈ μ + K0 * exp(α*(M0-Mc)) / (t + c)^p
+
+    mainshock_mag = float(mags_in_window.max()) if len(mags_in_window) > 0 else mc + 1.0
+    mag_factor = np.exp(beta * (mainshock_mag - mc))
+
+    # 先拟合大森定律获取 p, c
+    omori_result = fit_omori_utsu(
+        events,
+        mainshock_time=mainshock_time,
+        time_col=time_col,
+        obs_days=obs_days,
+        min_events=min_events,
+    )
+    p_hat = omori_result.get("omori_p", 1.0) if omori_result["omori_valid"] else 1.0
+    c_hat = omori_result.get("omori_c", 0.05) if omori_result["omori_valid"] else 0.05
+
+    if not np.isfinite(p_hat) or p_hat <= 0:
+        p_hat = 1.0
+    if not np.isfinite(c_hat) or c_hat <= 0:
+        c_hat = 0.05
+
+    # Step 3: 用 simplified MLE 估计 μ 和 K0
+    # 对于给定 Omori 参数，λ(t) = μ + A / (t+c)^p, A = K0 * exp(α*(M0-Mc))
+    # 使用 profile likelihood: 固定 α，优化 μ 和 K0
+
+    def omori_integral(start_day: float, end_day: float, p_val: float, c_val: float) -> float:
+        """∫ 1/(t+c)^p dt from start_day to end_day"""
+        s = max(start_day + c_val, 1e-9)
+        e = max(end_day + c_val, 1e-9)
+        if abs(p_val - 1.0) < 1e-4:
+            return float(np.log(e / s))
+        return float((e ** (1.0 - p_val) - s ** (1.0 - p_val)) / (1.0 - p_val))
+
+    def etas_neg_log_lik(params: np.ndarray) -> float:
+        """简化 ETAS 负对数似然（固定 p, c）。"""
+        log_mu, log_K0, alpha = params
+        mu = float(np.exp(log_mu))
+        K0 = float(np.exp(log_K0))
+        alpha = float(alpha)
+
+        if mu <= 0 or K0 <= 0:
+            return np.inf
+
+        A = K0 * np.exp(alpha * (mainshock_mag - mc))
+        integ_bg = mu * obs_days
+        integ_triggered = A * omori_integral(0.0, obs_days, p_hat, c_hat)
+        total_integ = integ_bg + integ_triggered
+
+        if total_integ <= 0 or not np.isfinite(total_integ):
+            return np.inf
+
+        # Log-likelihood for each event
+        triggered_contrib = A / (elapsed_days + c_hat) ** p_hat
+        lambda_vals = mu + triggered_contrib
+        if np.any(lambda_vals <= 0):
+            return np.inf
+
+        log_lik = np.sum(np.log(lambda_vals)) - total_integ
+        nll = -float(log_lik)
+        return nll if np.isfinite(nll) else np.inf
+
+    try:
+        result = minimize(
+            etas_neg_log_lik,
+            x0=np.array([np.log(0.01), np.log(0.1), 0.5], dtype=float),
+            bounds=[
+                (np.log(1e-6), np.log(10.0)),   # log_mu
+                (np.log(1e-6), np.log(100.0)),  # log_K0
+                (0.0, 3.0),                      # alpha
+            ],
+            method="L-BFGS-B",
+            options={"maxiter": 30},  # 快速近似
+        )
+
+        if result.success:
+            log_mu, log_K0, alpha_hat = result.x
+            return {
+                "etas_mu": float(np.exp(log_mu)),
+                "etas_K0": float(np.exp(log_K0)),
+                "etas_alpha": float(alpha_hat),
+                "etas_c": float(c_hat),
+                "etas_p": float(p_hat),
+                "etas_nll": float(result.fun),
+                "etas_n": int(n_events),
+                "etas_valid": True,
+            }
+        else:
+            return _empty_etas_result(n_events)
+    except Exception:
+        return _empty_etas_result(n_events)
+
+
 def _require_geospatial_dependencies():
     """按需导入地理空间依赖，并给出清晰的安装提示。"""
     try:
@@ -451,3 +660,97 @@ def calculate_geological_features(
         ).astype(int)
 
     return result_df
+
+
+# ============================================================
+#  震源机制解特征 (Global CMT)
+#  对应 project_plan 第 3.3 节
+# ============================================================
+
+def _load_gcmt_catalog(gcmt_path: Path) -> pd.DataFrame | None:
+    """安全加载 GCMT 目录。"""
+    if not gcmt_path.exists():
+        return None
+    try:
+        gcmt = pd.read_csv(gcmt_path)
+        gcmt["time"] = pd.to_datetime(gcmt["time"], utc=True, errors="coerce")
+        return gcmt.dropna(subset=["time", "latitude", "longitude"])
+    except Exception:
+        return None
+
+
+def match_focal_mechanism(
+    mainshock_time,
+    mainshock_lat: float,
+    mainshock_lon: float,
+    gcmt_df: pd.DataFrame,
+    time_window_days: float = 1.0,
+    spatial_radius_km: float = 200.0,
+    earth_radius_km: float = 6371.0,
+) -> dict:
+    """
+    匹配主震到 Global CMT 目录中最近的震源机制解。
+
+    返回 strike/dip/rake、断层类型 One-Hot 和 P/T 轴信息。
+    """
+    from src.utils import haversine_km as _hav
+
+    empty = {
+        "strike1": np.nan, "dip1": np.nan, "rake1": np.nan,
+        "strike2": np.nan, "dip2": np.nan, "rake2": np.nan,
+        "fault_type_NF": 0, "fault_type_SS": 0,
+        "fault_type_TF": 0, "fault_type_UNK": 1,
+        "plunge_P": np.nan, "trend_P": np.nan,
+        "plunge_T": np.nan, "trend_T": np.nan,
+        "f_clvd": np.nan,
+        "focal_mechanism_valid": False,
+    }
+
+    if gcmt_df is None or gcmt_df.empty:
+        return empty
+
+    ms_time = pd.to_datetime(mainshock_time, utc=True)
+    t_mask = (
+        (gcmt_df["time"] >= ms_time - pd.Timedelta(days=time_window_days))
+        & (gcmt_df["time"] <= ms_time + pd.Timedelta(days=time_window_days))
+    )
+    candidates = gcmt_df.loc[t_mask].copy()
+    if candidates.empty:
+        return empty
+
+    dists = _hav(
+        mainshock_lat, mainshock_lon,
+        candidates["latitude"].to_numpy(),
+        candidates["longitude"].to_numpy(),
+        earth_radius_km=earth_radius_km,
+    )
+    in_range = dists <= spatial_radius_km
+    if not in_range.any():
+        return empty
+
+    # 距离最近的匹配
+    best_idx = np.argmin(dists)
+    row = candidates.iloc[best_idx]
+
+    ft = str(row.get("fault_type", "UNK"))
+    fault_types = {"NF", "SS", "TF", "UNK"}
+    ft_clean = ft if ft in fault_types else "UNK"
+
+    return {
+        "strike1": float(row.get("strike1", np.nan)),
+        "dip1": float(row.get("dip1", np.nan)),
+        "rake1": float(row.get("rake1", np.nan)),
+        "strike2": float(row.get("strike2", np.nan)),
+        "dip2": float(row.get("dip2", np.nan)),
+        "rake2": float(row.get("rake2", np.nan)),
+        "fault_type_NF": 1 if ft_clean == "NF" else 0,
+        "fault_type_SS": 1 if ft_clean == "SS" else 0,
+        "fault_type_TF": 1 if ft_clean == "TF" else 0,
+        "fault_type_UNK": 1 if ft_clean == "UNK" else 0,
+        "plunge_P": float(row.get("plunge_P", np.nan)),
+        "trend_P": float(row.get("trend_P", np.nan)),
+        "plunge_T": float(row.get("plunge_T", np.nan)),
+        "trend_T": float(row.get("trend_T", np.nan)),
+        "f_clvd": float(row.get("f_clvd", np.nan)),
+        "focal_mechanism_valid": bool(np.isfinite(row.get("strike1", np.nan))),
+    }

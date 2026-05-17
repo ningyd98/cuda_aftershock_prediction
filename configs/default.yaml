@@ -1,8 +1,12 @@
 paths:
   base_sequences_csv: data/processed/ML_Ready_Sequences.csv
-  event_catalog_csv: data/raw/USGS_Mw6.0_Depth70_1970-2023.csv
+  mainshock_catalog_csv: data/raw/USGS_Mw6.0_Depth70_1970-2023.csv
+  event_catalog_csv: data/raw/USGS_Mw4.0_Depth70_1970-2023.csv
   plate_boundaries_geojson: data/raw/PB2002_boundaries.json
+  gcmt_catalog_csv: data/raw/GlobalCMT_1976-2024.csv
   advanced_features_csv: data/processed/advanced_features.csv
+  model_dir: data/models
+  submission_csv: data/processed/submission.csv
 
 phase1:
   obs_days: 3.0
@@ -37,6 +41,10 @@ phase1:
     unknown_type: UNK
     subduction_label: SUB
     one_hot_types: [SUB, OTF, OSR, UNK]
+  gcmt:
+    enabled: true
+    time_window_days: 1.0
+    spatial_radius_km: 200.0
 
 parallel:
   n_jobs: -1

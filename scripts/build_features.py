@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import numpy as np
 import yaml
 from joblib import Parallel, delayed
 from tqdm import tqdm
@@ -13,11 +14,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
 from src.features import (
+    _load_gcmt_catalog,
     calculate_geological_features,
     calculate_spatial_anisotropy,
+    calculate_temporal_binned_features,
+    estimate_etas_parameters,
     estimate_gr_b_value,
     fit_omori_utsu,
     load_plate_boundaries,
+    match_focal_mechanism,
 )
 from src.utils import haversine_km
 
@@ -128,6 +133,23 @@ def build_one_sequence_features(
         earth_radius_km=phase1_cfg["earth_radius_km"],
         **anisotropy_kwargs,
     )
+    temporal_features = calculate_temporal_binned_features(
+        early_events,
+        mainshock_time=sequence_row.mainshock_time,
+    )
+    etas_features = {}
+    try:
+        etas_features = estimate_etas_parameters(
+            early_events,
+            mainshock_time=sequence_row.mainshock_time,
+            obs_days=phase1_cfg["obs_days"],
+        )
+    except Exception:
+        etas_features = {
+            "etas_mu": np.nan, "etas_K0": np.nan, "etas_alpha": np.nan,
+            "etas_c": np.nan, "etas_p": np.nan, "etas_nll": np.nan,
+            "etas_n": int(len(early_events)), "etas_valid": False,
+        }
 
     return {
         "mainshock_id": sequence_row.mainshock_id,
@@ -135,6 +157,8 @@ def build_one_sequence_features(
         **gr_features,
         **omori_features,
         **anisotropy_features,
+        **temporal_features,
+        **etas_features,
     }
 
 
@@ -175,6 +199,16 @@ def main() -> None:
         if args.output is not None
         else resolve_project_path(cfg["paths"]["advanced_features_csv"])
     )
+
+    # 若完整事件目录不存在，回退到主震目录
+    if not event_catalog_path.exists():
+        fallback_path = resolve_project_path(
+            cfg["paths"].get("mainshock_catalog_csv", "data/raw/USGS_Mw6.0_Depth70_1970-2023.csv")
+        )
+        print(f"⚠ 完整事件目录不存在: {event_catalog_path}")
+        print(f"  回退到主震目录: {fallback_path}")
+        print(f"  提示: 运行 python main.py download-full-catalog 下载完整目录以获得更好的特征质量")
+        event_catalog_path = fallback_path
 
     sequence_df = pd.read_csv(sequences_path)
     if args.limit is not None:
@@ -229,13 +263,42 @@ def main() -> None:
     merged_df = merged_df.merge(geology_df, on="mainshock_id", how="left")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # ---- GCMT 震源机制解匹配 ----
+    gcmt_path = cfg["paths"].get("gcmt_catalog_csv")
+    gcmt_enabled = bool(cfg.get("phase1", {}).get("gcmt", {}).get("enabled", True))
+    focal_features: list[dict] = []
+    if gcmt_enabled and gcmt_path:
+        gcmt_path = resolve_project_path(gcmt_path)
+        gcmt_df = _load_gcmt_catalog(gcmt_path)
+        if gcmt_df is not None and not gcmt_df.empty:
+            for row in tqdm(rows, desc="匹配 GCMT 震源机制"):
+                fm = match_focal_mechanism(
+                    mainshock_time=row.mainshock_time,
+                    mainshock_lat=row.mainshock_lat,
+                    mainshock_lon=row.mainshock_lon,
+                    gcmt_df=gcmt_df,
+                )
+                fm["mainshock_id"] = row.mainshock_id
+                focal_features.append(fm)
+            print(f"GCMT 匹配完成: {sum(f['focal_mechanism_valid'] for f in focal_features)} 条有效")
+        else:
+            print("⚠ GCMT 目录不可用，跳过震源机制解特征")
+    if focal_features:
+        focal_df = pd.DataFrame(focal_features)
+        merged_df = merged_df.merge(focal_df, on="mainshock_id", how="left")
+    else:
+        print("⚠ 跳过震源机制解特征（GCMT 目录未找到或被禁用）")
+
     merged_df.to_csv(output_path, index=False, encoding="utf-8")
 
     print(f"高级特征已保存: {output_path}")
     print(f"样本数: {len(merged_df)}")
+    print(f"总特征列数: {len(merged_df.columns)}")
     print(f"有效 b 值样本数: {int(merged_df['gr_valid'].sum())}")
     print(f"有效大森参数样本数: {int(merged_df['omori_valid'].sum())}")
     print(f"有效各向异性样本数: {int(merged_df['anisotropy_valid'].sum())}")
+    print(f"有效震源机制解样本数: {int(merged_df.get('focal_mechanism_valid', pd.Series([0]*len(merged_df))).sum())}")
     if geology_enabled:
         print("最近板块边界类型分布:")
         print(merged_df["nearest_plate_boundary_type"].value_counts(dropna=False))

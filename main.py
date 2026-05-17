@@ -13,7 +13,14 @@ SCRIPT_MAP = {
     "build-sequences": PROJECT_ROOT / "src" / "data_loader.py",
     "build-features": PROJECT_ROOT / "scripts" / "build_features.py",
     "download-usgs": PROJECT_ROOT / "scripts" / "download_usgs.py",
+    "download-full-catalog": PROJECT_ROOT / "scripts" / "download_full_catalog.py",
     "download-pb2002": PROJECT_ROOT / "scripts" / "download_pb2002.py",
+    "download-gcmt": PROJECT_ROOT / "scripts" / "download_gcmt.py",
+    "make-submission": PROJECT_ROOT / "scripts" / "make_submission.py",
+    "mock-evaluation": PROJECT_ROOT / "scripts" / "mock_evaluation.py",
+    "train-baseline": PROJECT_ROOT / "scripts" / "train_baseline.py",
+    "train-dl": PROJECT_ROOT / "scripts" / "train_dl.py",
+    "train-gnn": PROJECT_ROOT / "scripts" / "train_gnn.py",
 }
 
 

@@ -1,0 +1,22 @@
+{
+  "created_at": "2026-05-17T15:17:08.952226+00:00",
+  "backend": "xgboost",
+  "target_cols": [
+    "target_max_mag",
+    "target_time_to_max_days"
+  ],
+  "time_col": "mainshock_time",
+  "n_splits": 5,
+  "seed": 42,
+  "late_weight": 2.0,
+  "n_estimators": 300,
+  "learning_rate": 0.03,
+  "mean_metrics": {
+    "mag_rmse": 1.3874703255758836,
+    "mag_mae": 0.5859849253766426,
+    "time_rmse": 2.534218003080354,
+    "time_mae": 0.8728876352270987,
+    "time_asymmetric_mae": 1.351143510823756,
+    "time_asymmetric_rmse": 2.753975610392896
+  }
+}

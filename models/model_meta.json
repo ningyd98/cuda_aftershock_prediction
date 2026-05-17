@@ -1,0 +1,22 @@
+{
+  "created_at": "2026-05-17T11:28:06.093570+00:00",
+  "backend": "sklearn_hist_gradient_boosting",
+  "target_cols": [
+    "target_max_mag",
+    "target_time_to_max_days"
+  ],
+  "time_col": "mainshock_time",
+  "n_splits": 5,
+  "seed": 42,
+  "late_weight": 2.0,
+  "n_estimators": 300,
+  "learning_rate": 0.03,
+  "mean_metrics": {
+    "mag_rmse": 1.382716699497419,
+    "mag_mae": 0.5673370149746556,
+    "time_rmse": 2.5222138183956053,
+    "time_mae": 0.8159628858830285,
+    "time_asymmetric_mae": 1.225206438358397,
+    "time_asymmetric_rmse": 2.680323273737968
+  }
+}
