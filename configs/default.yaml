@@ -22,6 +22,21 @@ phase1:
     initial_c: 0.05
     boundary_tol: 0.0001
     fit_start_day: 0.0
+  anisotropy:
+    lat_col: latitude
+    lon_col: longitude
+    min_events: 3
+    ratio_epsilon: 1.0e-9
+  geology:
+    enabled: true
+    lat_col: mainshock_lat
+    lon_col: mainshock_lon
+    type_field: STEP_CLASS
+    fallback_type_field: Type
+    distance_crs: EPSG:3857
+    unknown_type: UNK
+    subduction_label: SUB
+    one_hot_types: [SUB, OTF, OSR, UNK]
 
 parallel:
   n_jobs: -1

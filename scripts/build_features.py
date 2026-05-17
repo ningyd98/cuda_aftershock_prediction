@@ -12,7 +12,13 @@ from tqdm import tqdm
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
-from src.features import estimate_gr_b_value, fit_omori_utsu
+from src.features import (
+    calculate_geological_features,
+    calculate_spatial_anisotropy,
+    estimate_gr_b_value,
+    fit_omori_utsu,
+    load_plate_boundaries,
+)
 from src.utils import haversine_km
 
 
@@ -97,6 +103,7 @@ def build_one_sequence_features(
     phase1_cfg: dict,
     gr_kwargs: dict,
     omori_kwargs: dict,
+    anisotropy_kwargs: dict,
 ) -> dict:
     """单个主震序列的高级特征计算单元，供 joblib 并行调用。"""
     early_events = extract_early_aftershocks(
@@ -114,12 +121,20 @@ def build_one_sequence_features(
         obs_days=phase1_cfg["obs_days"],
         **omori_kwargs,
     )
+    anisotropy_features = calculate_spatial_anisotropy(
+        early_events,
+        mainshock_lat=sequence_row.mainshock_lat,
+        mainshock_lon=sequence_row.mainshock_lon,
+        earth_radius_km=phase1_cfg["earth_radius_km"],
+        **anisotropy_kwargs,
+    )
 
     return {
         "mainshock_id": sequence_row.mainshock_id,
         "advanced_early_event_count": int(len(early_events)),
         **gr_features,
         **omori_features,
+        **anisotropy_features,
     }
 
 
@@ -154,6 +169,7 @@ def main() -> None:
 
     sequences_path = resolve_project_path(cfg["paths"]["base_sequences_csv"])
     event_catalog_path = resolve_project_path(cfg["paths"]["event_catalog_csv"])
+    plate_boundaries_path = resolve_project_path(cfg["paths"]["plate_boundaries_geojson"])
     output_path = (
         resolve_project_path(args.output)
         if args.output is not None
@@ -169,8 +185,27 @@ def main() -> None:
     phase1_cfg = cfg["phase1"]
     gr_kwargs = dict(phase1_cfg["gr"])
     omori_kwargs = dict(phase1_cfg["omori"])
+    anisotropy_kwargs = dict(phase1_cfg["anisotropy"])
+    geology_kwargs = dict(phase1_cfg["geology"])
     parallel_cfg = cfg["parallel"]
     rows = list(sequence_df.itertuples(index=False))
+
+    geology_enabled = bool(geology_kwargs.pop("enabled", True))
+    if geology_enabled:
+        boundaries_gdf = load_plate_boundaries(
+            plate_boundaries_path,
+            type_field=geology_kwargs.pop("type_field"),
+            fallback_type_field=geology_kwargs.pop("fallback_type_field"),
+            unknown_type=geology_kwargs["unknown_type"],
+            subduction_label=geology_kwargs.pop("subduction_label"),
+        )
+        geology_df = calculate_geological_features(
+            sequence_df,
+            boundaries_gdf,
+            **geology_kwargs,
+        )
+    else:
+        geology_df = pd.DataFrame({"mainshock_id": sequence_df["mainshock_id"]})
 
     results = Parallel(
         n_jobs=parallel_cfg["n_jobs"],
@@ -184,12 +219,14 @@ def main() -> None:
             phase1_cfg=phase1_cfg,
             gr_kwargs=gr_kwargs,
             omori_kwargs=omori_kwargs,
+            anisotropy_kwargs=anisotropy_kwargs,
         )
         for row in tqdm(rows, desc="提取高级特征")
     )
 
     feature_df = pd.DataFrame(results)
     merged_df = sequence_df.merge(feature_df, on="mainshock_id", how="left")
+    merged_df = merged_df.merge(geology_df, on="mainshock_id", how="left")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     merged_df.to_csv(output_path, index=False, encoding="utf-8")
@@ -198,6 +235,10 @@ def main() -> None:
     print(f"样本数: {len(merged_df)}")
     print(f"有效 b 值样本数: {int(merged_df['gr_valid'].sum())}")
     print(f"有效大森参数样本数: {int(merged_df['omori_valid'].sum())}")
+    print(f"有效各向异性样本数: {int(merged_df['anisotropy_valid'].sum())}")
+    if geology_enabled:
+        print("最近板块边界类型分布:")
+        print(merged_df["nearest_plate_boundary_type"].value_counts(dropna=False))
 
 
 if __name__ == "__main__":

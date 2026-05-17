@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -34,6 +35,18 @@ def _empty_omori_result(n_events: int, nll: float = np.nan) -> dict:
         "omori_n": int(n_events),
         "omori_p_boundary_hit": False,
         "omori_valid": False,
+    }
+
+
+def _empty_anisotropy_result(n_events: int) -> dict:
+    """返回统一格式的空间各向异性空结果。"""
+    return {
+        "anisotropy_major_axis_km": np.nan,
+        "anisotropy_minor_axis_km": np.nan,
+        "anisotropy_axis_ratio": np.nan,
+        "anisotropy_azimuth_deg": np.nan,
+        "anisotropy_n": int(n_events),
+        "anisotropy_valid": False,
     }
 
 
@@ -208,3 +221,233 @@ def fit_omori_utsu(
             and np.isfinite(result.fun)
         ),
     }
+
+
+def calculate_spatial_anisotropy(
+    events: pd.DataFrame,
+    mainshock_lat: float,
+    mainshock_lon: float,
+    lat_col: str = "latitude",
+    lon_col: str = "longitude",
+    min_events: int = 3,
+    ratio_epsilon: float = 1e-9,
+    earth_radius_km: float = 6371.0,
+) -> dict:
+    """
+    计算早期余震相对主震的空间各向异性特征。
+
+    使用主震位置作为局部切平面原点，将经纬度近似投影到 km 坐标：
+    x = R * cos(lat0) * dlon, y = R * dlat。随后对二维坐标做协方差
+    分解，输出主轴长度、短轴长度、长短轴比和主轴方位角。
+    """
+    if lat_col not in events.columns or lon_col not in events.columns:
+        return _empty_anisotropy_result(0)
+
+    coords = events[[lat_col, lon_col]].dropna().astype(float)
+    if len(coords) < min_events:
+        return _empty_anisotropy_result(len(coords))
+
+    lat0 = np.radians(float(mainshock_lat))
+    lon0 = np.radians(float(mainshock_lon))
+    lat = np.radians(coords[lat_col].to_numpy())
+    lon = np.radians(coords[lon_col].to_numpy())
+
+    x_km = earth_radius_km * np.cos(lat0) * (lon - lon0)
+    y_km = earth_radius_km * (lat - lat0)
+    xy = np.column_stack([x_km, y_km])
+
+    if not np.isfinite(xy).all():
+        xy = xy[np.isfinite(xy).all(axis=1)]
+    if len(xy) < min_events:
+        return _empty_anisotropy_result(len(xy))
+
+    cov_matrix = np.cov(xy, rowvar=False)
+    if cov_matrix.shape != (2, 2) or not np.isfinite(cov_matrix).all():
+        return _empty_anisotropy_result(len(xy))
+
+    eigvals, eigvecs = np.linalg.eigh(cov_matrix)
+    eigvals = np.maximum(eigvals, 0.0)
+    order = np.argsort(eigvals)[::-1]
+    eigvals = eigvals[order]
+    eigvecs = eigvecs[:, order]
+
+    major_axis_km = float(np.sqrt(eigvals[0]))
+    minor_axis_km = float(np.sqrt(eigvals[1]))
+    axis_ratio = major_axis_km / max(minor_axis_km, ratio_epsilon)
+
+    # 方位角定义为从正北顺时针到主轴方向，范围 [0, 180)。
+    major_vec = eigvecs[:, 0]
+    azimuth_deg = float((np.degrees(np.arctan2(major_vec[0], major_vec[1])) + 180.0) % 180.0)
+
+    return {
+        "anisotropy_major_axis_km": major_axis_km,
+        "anisotropy_minor_axis_km": minor_axis_km,
+        "anisotropy_axis_ratio": float(axis_ratio),
+        "anisotropy_azimuth_deg": azimuth_deg,
+        "anisotropy_n": int(len(xy)),
+        "anisotropy_valid": bool(np.isfinite(axis_ratio)),
+    }
+
+
+def _require_geospatial_dependencies():
+    """按需导入地理空间依赖，并给出清晰的安装提示。"""
+    try:
+        import geopandas as gpd
+        from shapely.geometry import Point
+    except ImportError as exc:
+        raise ImportError(
+            "地质构造特征需要 geopandas、shapely 和 pyproj。"
+            "请先运行: pip install -r requirements.txt"
+        ) from exc
+    return gpd, Point
+
+
+def _normalize_plate_boundary_type(
+    raw_value,
+    unknown_type: str = "UNK",
+    subduction_label: str = "SUB",
+) -> str:
+    """将 PB2002 边界类型标准化为稳定类别。"""
+    if raw_value is None or pd.isna(raw_value):
+        return unknown_type
+
+    value = str(raw_value).strip()
+    if not value:
+        return unknown_type
+
+    upper_value = value.upper()
+    if value.lower() == "subduction":
+        return subduction_label
+    return upper_value
+
+
+def load_plate_boundaries(
+    geojson_path: str | Path,
+    type_field: str = "STEP_CLASS",
+    fallback_type_field: str = "Type",
+    unknown_type: str = "UNK",
+    subduction_label: str = "SUB",
+):
+    """
+    读取 Peter Bird 板块边界 GeoJSON，并标准化边界类型字段。
+
+    类型字段优先使用 STEP_CLASS；若当前文件不存在该字段，则回退到 Type。
+    """
+    gpd, _ = _require_geospatial_dependencies()
+    boundaries_gdf = gpd.read_file(geojson_path)
+
+    if boundaries_gdf.empty:
+        raise ValueError(f"板块边界文件为空: {geojson_path}")
+
+    if boundaries_gdf.crs is None:
+        boundaries_gdf = boundaries_gdf.set_crs("EPSG:4326")
+    else:
+        boundaries_gdf = boundaries_gdf.to_crs("EPSG:4326")
+
+    if type_field in boundaries_gdf.columns:
+        raw_type = boundaries_gdf[type_field]
+    elif fallback_type_field in boundaries_gdf.columns:
+        raw_type = boundaries_gdf[fallback_type_field]
+    else:
+        raw_type = pd.Series([unknown_type] * len(boundaries_gdf), index=boundaries_gdf.index)
+
+    boundaries_gdf = boundaries_gdf.copy()
+    boundaries_gdf["plate_boundary_type"] = raw_type.map(
+        lambda value: _normalize_plate_boundary_type(
+            value,
+            unknown_type=unknown_type,
+            subduction_label=subduction_label,
+        )
+    )
+    return boundaries_gdf
+
+
+def calculate_geological_features(
+    sequence_df: pd.DataFrame,
+    boundaries_gdf,
+    lat_col: str = "mainshock_lat",
+    lon_col: str = "mainshock_lon",
+    distance_crs: str = "EPSG:3857",
+    one_hot_types: Sequence[str] = ("SUB", "OTF", "OSR", "UNK"),
+    unknown_type: str = "UNK",
+) -> pd.DataFrame:
+    """
+    批量计算主震到最近板块边界的距离和边界类型特征。
+
+    输出与 sequence_df 等长的 DataFrame，包含 mainshock_id、最近边界距离、
+    最近边界类型，以及稳定 One-Hot 类型列。
+    """
+    gpd, Point = _require_geospatial_dependencies()
+    required_cols = ["mainshock_id", lat_col, lon_col]
+    missing_cols = [col for col in required_cols if col not in sequence_df.columns]
+    if missing_cols:
+        raise ValueError(f"基础样本表缺少地质特征所需字段: {missing_cols}")
+
+    points_df = sequence_df[required_cols].copy()
+    valid_mask = points_df[[lat_col, lon_col]].notna().all(axis=1)
+
+    result_df = pd.DataFrame({"mainshock_id": sequence_df["mainshock_id"]})
+    result_df["plate_boundary_distance_km"] = np.nan
+    result_df["nearest_plate_boundary_type"] = unknown_type
+
+    for plate_type in one_hot_types:
+        result_df[f"plate_type_{plate_type}"] = 0
+
+    if not valid_mask.any():
+        result_df[f"plate_type_{unknown_type}"] = 1
+        return result_df
+
+    point_geometries = [
+        Point(lon, lat)
+        for lat, lon in points_df.loc[valid_mask, [lat_col, lon_col]].itertuples(index=False)
+    ]
+    points_gdf = gpd.GeoDataFrame(
+        points_df.loc[valid_mask, ["mainshock_id"]].copy(),
+        geometry=point_geometries,
+        crs="EPSG:4326",
+    )
+
+    projected_points = points_gdf.to_crs(distance_crs)
+    projected_boundaries = boundaries_gdf.to_crs(distance_crs)
+    projected_boundaries = projected_boundaries[["plate_boundary_type", "geometry"]].copy()
+
+    nearest = gpd.sjoin_nearest(
+        projected_points,
+        projected_boundaries,
+        how="left",
+        distance_col="plate_boundary_distance_m",
+    )
+    nearest = nearest.drop_duplicates(subset=["mainshock_id"], keep="first")
+    nearest["plate_boundary_distance_km"] = (
+        nearest["plate_boundary_distance_m"].astype(float) / 1000.0
+    )
+    nearest["nearest_plate_boundary_type"] = (
+        nearest["plate_boundary_type"].fillna(unknown_type).astype(str)
+    )
+    nearest.loc[
+        ~nearest["nearest_plate_boundary_type"].isin(one_hot_types),
+        "nearest_plate_boundary_type",
+    ] = unknown_type
+
+    result_df = result_df.drop(columns=["plate_boundary_distance_km", "nearest_plate_boundary_type"])
+    result_df = result_df.merge(
+        nearest[
+            [
+                "mainshock_id",
+                "plate_boundary_distance_km",
+                "nearest_plate_boundary_type",
+            ]
+        ],
+        on="mainshock_id",
+        how="left",
+    )
+    result_df["nearest_plate_boundary_type"] = result_df[
+        "nearest_plate_boundary_type"
+    ].fillna(unknown_type)
+
+    for plate_type in one_hot_types:
+        result_df[f"plate_type_{plate_type}"] = (
+            result_df["nearest_plate_boundary_type"] == plate_type
+        ).astype(int)
+
+    return result_df
