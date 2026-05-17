@@ -9,7 +9,7 @@
 │                       数据层 (Data Layer)                     │
 │  data/raw/                                                   │
 │  ├── USGS_Mw6.0_Depth70_1970-2023.csv   ← 主震目录 (Mw≥6.0) │
-│  ├── USGS_Mw4.5_Depth70_1970-2023.csv   ← 完整目录 (特征用)  │
+│  ├── USGS_Mw4.0_Depth70_1970-2023.csv   ← 完整目录 (特征用)  │
 │  └── PB2002_boundaries.json             ← 板块边界 GeoJSON   │
 ├─────────────────────────────────────────────────────────────┤
 │                      特征层 (Feature Layer)                   │
@@ -34,9 +34,11 @@
 
 ```bash
 chmod +x run.sh
-./run.sh              # 全流程：下载 → 序列 → 特征 → 训练 → 预测
-./run.sh --skip-dl    # 跳过下载（数据已就绪）
-./run.sh train-only   # 仅重新训练
+./run.sh --skip-download              # 快速稳定版：LightGBM + XGBoost
+./run.sh --skip-download --with-dl    # 额外训练 Transformer
+./run.sh --skip-download --with-gnn   # 额外训练 ST-GNN
+./run.sh --skip-download --with-deep  # 同时训练 Transformer + ST-GNN
+./run.sh train-only                   # 只重训模型并重新生成提交
 ```
 
 ## 分步命令
@@ -50,8 +52,8 @@ python main.py download-pb2002
 # USGS Mw≥6.0 强震目录
 python main.py download-usgs
 
-# USGS Mw≥4.5 完整目录（用于余震特征提取）
-python main.py download-full-catalog
+# USGS Mw≥4.0 完整目录（用于余震特征提取）
+python main.py download-full-catalog --min-mag 4.0
 ```
 
 ### 2. 构建主震-余震序列
@@ -59,7 +61,7 @@ python main.py download-full-catalog
 ```bash
 # 使用完整目录构建序列（推荐）
 python src/data_loader.py \
-    --input data/raw/USGS_Mw4.5_Depth70_1970-2023.csv \
+    --input data/raw/USGS_Mw4.0_Depth70_1970-2023.csv \
     --output data/processed/ML_Ready_Sequences.csv
 
 # 或通过统一入口
@@ -81,6 +83,7 @@ python main.py build-features --limit 50 --output data/processed/advanced_featur
 python main.py train-baseline \
     --data data/processed/advanced_features.csv \
     --n-splits 5 \
+    --model-type both \
     --save-dir data/models
 ```
 
@@ -91,8 +94,7 @@ python main.py train-baseline \
 python main.py make-submission \
     --input data/test_sequences/20230206011734_eq.csv \
     --output data/processed/submission.csv \
-    --baseline-model data/models/baseline_model.joblib \
-    --feature-cols data/models/feature_cols.json \
+    --model-dir data/models \
     --allow-rule-fallback
 ```
 
@@ -106,7 +108,7 @@ python main.py make-submission \
 | **特征工程** | G-R b值、大森-宇津 p/c/k、空间各向异性、板块构造 |
 | **验证策略** | 时间序列交叉验证 (TimeSeriesSplit, n=5) |
 | **评估指标** | Mag RMSE/MAE + Time RMSE/MAE + 非对称时间惩罚 (late_weight=2.0) |
-| **Baseline** | LightGBM 多输出回归 (300 trees, lr=0.03) |
+| **Baseline** | LightGBM + XGBoost 多输出回归，基于 OOF 搜索融合权重 |
 
 ## 目录结构
 
@@ -147,11 +149,11 @@ python main.py make-submission \
 - ✅ 震源机制解特征 (Global CMT: strike/dip/rake, P/T轴, 断层类型)
 - ✅ Gardner & Knopoff 去聚类算法 (src/utils.py)
 - ✅ joblib 并行特征生成
-- ✅ LightGBM Baseline 时间序列 CV
-- ✅ XGBoost 第二 Baseline 时间序列 CV
-- ✅ Transformer 深度学习模型 (双输入融合)
-- ✅ ST-GNN 时空图神经网络 (SpatialGraphConv + TemporalGRU)
-- ✅ 多模型加权融合推理 (LightGBM + XGBoost + DL + GNN)
+- ✅ LightGBM + XGBoost Baseline 时间序列 CV
+- ✅ 基于 OOF 的树模型融合权重搜索
+- ✅ Transformer 深度学习模型 (可选训练，双输入融合)
+- ✅ ST-GNN 时空图神经网络 (可选训练，SpatialGraphConv + TemporalGRU)
+- ✅ 多模型加权融合推理 (默认树模型；DL/GNN 产物存在且权重大于 0 时参与)
 - ✅ 非对称时间惩罚评估指标
 - ✅ 一键运行脚本 (run.sh)
 - ✅ 模拟线上评测系统 (mock_evaluation.py)

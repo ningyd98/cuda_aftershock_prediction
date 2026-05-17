@@ -5,14 +5,15 @@ INPUT="${1:-data/test_sequences/20010126031640_eq.csv}"
 OUTPUT="${2:-submission.csv}"
 
 python -m compileall main.py src scripts
-python main.py build-features
-python scripts/train_baseline.py --n-splits 5 --save-dir models
+python scripts/train_baseline.py \
+  --data data/processed/advanced_features.csv \
+  --n-splits 5 \
+  --model-type both \
+  --save-dir data/models
 python scripts/make_submission.py \
   --input "$INPUT" \
   --output "$OUTPUT" \
-  --baseline-model models/baseline_model.joblib \
-  --feature-cols models/feature_cols.json \
-  --ensemble-weights models/ensemble_weights.json \
+  --model-dir data/models \
   --allow-rule-fallback
 
 OUTPUT_PATH="$OUTPUT" python - <<'PY'

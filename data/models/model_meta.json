@@ -1,22 +1,53 @@
 {
-  "created_at": "2026-05-17T15:17:08.952226+00:00",
-  "backend": "xgboost",
+  "created_at": "2026-05-17T15:36:32.620947+00:00",
+  "training_data": "/Users/ningyedong/Coding/人工智能导论/余震预测技术国际大赛/data/processed/advanced_features.csv",
+  "feature_count": 48,
   "target_cols": [
     "target_max_mag",
     "target_time_to_max_days"
   ],
   "time_col": "mainshock_time",
+  "model_type": "both",
+  "model_backends": {
+    "baseline": "lightgbm",
+    "xgboost": "xgboost"
+  },
   "n_splits": 5,
   "seed": 42,
   "late_weight": 2.0,
   "n_estimators": 300,
   "learning_rate": 0.03,
-  "mean_metrics": {
-    "mag_rmse": 1.3874703255758836,
-    "mag_mae": 0.5859849253766426,
-    "time_rmse": 2.534218003080354,
-    "time_mae": 0.8728876352270987,
-    "time_asymmetric_mae": 1.351143510823756,
-    "time_asymmetric_rmse": 2.753975610392896
+  "mean_metrics_by_model": {
+    "baseline": {
+      "mag_rmse": 1.3874703255758836,
+      "mag_mae": 0.5859849253766426,
+      "time_rmse": 2.534218003080354,
+      "time_mae": 0.8728876352270987,
+      "time_asymmetric_mae": 1.351143510823756,
+      "time_asymmetric_rmse": 2.753975610392896
+    },
+    "xgboost": {
+      "mag_rmse": 1.3790371718923542,
+      "mag_mae": 0.5710657424809382,
+      "time_rmse": 2.6124870106758187,
+      "time_mae": 0.8643593824717403,
+      "time_asymmetric_mae": 1.345876764555794,
+      "time_asymmetric_rmse": 2.9178393976868975
+    }
+  },
+  "ensemble_weights": {
+    "baseline": 0.72,
+    "xgboost": 0.28,
+    "dl": 0.0,
+    "gnn": 0.0
+  },
+  "ensemble_metrics": {
+    "mag_rmse": 1.3752750366603408,
+    "mag_mae": 0.5817758089908925,
+    "time_rmse": 2.555247013778656,
+    "time_mae": 0.8689898407526803,
+    "time_asymmetric_mae": 1.3474039963143494,
+    "time_asymmetric_rmse": 2.7684184503906843,
+    "ensemble_objective": 4.143693487051025
   }
 }

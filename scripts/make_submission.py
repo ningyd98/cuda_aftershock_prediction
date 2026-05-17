@@ -214,12 +214,14 @@ def make_model_matrix(feature_df: pd.DataFrame, feature_cols: list[str]) -> pd.D
 def load_ensemble_weights(path: Path | None) -> dict:
     """读取融合权重，缺省使用 baseline=1。"""
     if path is None or not path.exists():
-        return {"baseline": 1.0, "dl": 0.0}
+        return {"baseline": 1.0, "xgboost": 0.0, "dl": 0.0, "gnn": 0.0}
     with path.open("r", encoding="utf-8") as file:
         weights = json.load(file)
     return {
         "baseline": float(weights.get("baseline", 1.0)),
+        "xgboost": float(weights.get("xgboost", 0.0)),
         "dl": float(weights.get("dl", 0.0)),
+        "gnn": float(weights.get("gnn", 0.0)),
     }
 
 
@@ -227,6 +229,18 @@ def predict_with_baseline(model_path: Path, X: pd.DataFrame) -> np.ndarray:
     """加载 baseline 模型并预测。"""
     model = joblib.load(model_path)
     return np.asarray(model.predict(X), dtype=float).reshape(1, 2)
+
+
+def configure_torch_inference_threads(torch_module) -> None:
+    """推理时限制 PyTorch 线程，避免 macOS/OpenMP 小张量前向卡顿。"""
+    try:
+        torch_module.set_num_threads(1)
+    except RuntimeError:
+        pass
+    try:
+        torch_module.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
 
 
 def predict_with_dl(
@@ -245,6 +259,7 @@ def predict_with_dl(
 
     try:
         import torch
+        configure_torch_inference_threads(torch)
 
         with open(dl_meta_path, "r") as f:
             dl_meta = json.load(f)
@@ -287,6 +302,61 @@ def predict_with_dl(
         return None
 
 
+def predict_with_gnn(
+    gnn_model_path: Path,
+    gnn_meta_path: Path,
+    event_df: pd.DataFrame,
+    global_feature_df: pd.DataFrame,
+    device: str = "cpu",
+) -> np.ndarray | None:
+    """加载 ST-GNN 模型并预测；模型不可用时返回 None。"""
+    if not gnn_model_path.exists() or not gnn_meta_path.exists():
+        return None
+
+    try:
+        import torch
+        configure_torch_inference_threads(torch)
+
+        with gnn_meta_path.open("r", encoding="utf-8") as file:
+            gnn_meta = json.load(file)
+
+        from src.dataset import (
+            EarthquakeSequenceDataset,
+            SequenceBuildConfig,
+            earthquake_collate_fn,
+        )
+        from src.models_gnn import STGNNPredictor
+
+        model = STGNNPredictor(
+            event_feature_dim=gnn_meta["event_feature_dim"],
+            global_feature_dim=gnn_meta["global_feature_dim"],
+            node_hidden_dim=gnn_meta.get("node_hidden_dim", 64),
+            num_gnn_layers=gnn_meta.get("num_gnn_layers", 3),
+        )
+        model.load_state_dict(torch.load(gnn_model_path, map_location=device, weights_only=True))
+        model.to(device)
+        model.eval()
+
+        seq_config = SequenceBuildConfig(obs_days=3.0, spatial_radius_km=100.0, max_seq_len=256)
+        dataset = EarthquakeSequenceDataset(
+            sequence_df=global_feature_df,
+            event_catalog_df=event_df,
+            global_feature_cols=gnn_meta["global_feature_cols"],
+            config=seq_config,
+        )
+        batch = earthquake_collate_fn([dataset[0]])
+
+        with torch.no_grad():
+            seq_x = batch["seq_x"].to(device)
+            global_x = batch["global_x"].to(device)
+            mask = batch["seq_padding_mask"].to(device)
+            preds = model(seq_x, global_x, mask)
+            return preds.cpu().numpy().reshape(1, 2)
+    except Exception as exc:
+        print(f"   GNN 模型预测失败: {exc}")
+        return None
+
+
 def rule_fallback_prediction(mainshock_mag: float, early_count: int) -> np.ndarray:
     """模型缺失或异常时的保底预测。"""
     fallback_mag = max(0.0, min(mainshock_mag - 1.2, mainshock_mag + 0.5))
@@ -318,21 +388,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", type=Path, required=True, help="待预测单序列 CSV")
     parser.add_argument("--output", type=Path, required=True, help="submission 输出路径")
     parser.add_argument(
+        "--model-dir",
+        type=Path,
+        default=PROJECT_ROOT / "data" / "models",
+        help="统一模型产物目录",
+    )
+    parser.add_argument(
         "--baseline-model",
         type=Path,
-        default=PROJECT_ROOT / "models" / "baseline_model.joblib",
+        default=None,
         help="baseline 模型路径",
     )
     parser.add_argument(
         "--feature-cols",
         type=Path,
-        default=PROJECT_ROOT / "models" / "feature_cols.json",
+        default=None,
         help="训练阶段保存的特征列路径",
     )
     parser.add_argument(
         "--ensemble-weights",
         type=Path,
-        default=PROJECT_ROOT / "models" / "ensemble_weights.json",
+        default=None,
         help="融合权重 JSON 路径",
     )
     parser.add_argument(
@@ -357,9 +433,22 @@ def main() -> None:
     args = parse_args()
     input_path = resolve_project_path(args.input)
     output_path = resolve_project_path(args.output)
-    baseline_model_path = resolve_project_path(args.baseline_model)
-    feature_cols_path = resolve_project_path(args.feature_cols)
-    ensemble_weights_path = resolve_project_path(args.ensemble_weights)
+    model_dir = resolve_project_path(args.model_dir)
+    baseline_model_path = (
+        resolve_project_path(args.baseline_model)
+        if args.baseline_model is not None
+        else model_dir / "baseline_model.joblib"
+    )
+    feature_cols_path = (
+        resolve_project_path(args.feature_cols)
+        if args.feature_cols is not None
+        else model_dir / "feature_cols.json"
+    )
+    ensemble_weights_path = (
+        resolve_project_path(args.ensemble_weights)
+        if args.ensemble_weights is not None
+        else model_dir / "ensemble_weights.json"
+    )
     plate_boundaries_path = resolve_project_path(args.plate_boundaries)
 
     event_df = normalize_event_table(pd.read_csv(input_path))
@@ -380,22 +469,27 @@ def main() -> None:
         X = make_model_matrix(feature_df, feature_cols)
         weights = load_ensemble_weights(ensemble_weights_path)
 
-        # Baseline 预测
-        baseline_pred = predict_with_baseline(baseline_model_path, X)
+        weighted_preds: list[tuple[str, float, np.ndarray]] = []
+
         baseline_weight = max(float(weights.get("baseline", 1.0)), 0.0)
+        if baseline_weight > 0 and baseline_model_path.exists():
+            baseline_pred = predict_with_baseline(baseline_model_path, X)
+            weighted_preds.append(("baseline", baseline_weight, baseline_pred))
+        elif baseline_weight > 0:
+            print(f"   baseline 权重大于 0，但模型不存在，已跳过: {baseline_model_path}")
 
         # XGBoost 预测（如可用）
-        xgb_pred = None
-        xgb_weight = float(weights.get("xgboost", 0.0))
+        xgb_weight = max(float(weights.get("xgboost", 0.0)), 0.0)
         if xgb_weight > 0:
             xgb_model_path = baseline_model_path.parent / "xgboost_model.joblib"
             if xgb_model_path.exists():
                 xgb_pred = predict_with_baseline(xgb_model_path, X)
-                print(f"   XGBoost 模型已加载，权重: {xgb_weight}")
+                weighted_preds.append(("xgboost", xgb_weight, xgb_pred))
+            else:
+                print(f"   XGBoost 权重大于 0，但模型不存在，已跳过: {xgb_model_path}")
 
         # DL 预测（如可用）
-        dl_pred = None
-        dl_weight = float(weights.get("dl", 0.0))
+        dl_weight = max(float(weights.get("dl", 0.0)), 0.0)
         if dl_weight > 0:
             dl_model_path = baseline_model_path.parent / "dl_model.pt"
             dl_meta_path = baseline_model_path.parent / "dl_meta.json"
@@ -404,20 +498,35 @@ def main() -> None:
                 event_df, feature_df,
             )
             if dl_pred is not None:
-                print(f"   DL 模型已加载，权重: {dl_weight}")
+                weighted_preds.append(("dl", dl_weight, dl_pred))
             else:
-                print("   DL 模型不可用，回退")
+                print("   DL 权重大于 0，但模型不可用，已跳过")
 
-        # 加权融合
-        total_weight = baseline_weight
-        fused_pred = baseline_pred * baseline_weight
-        if xgb_pred is not None and xgb_weight > 0:
-            fused_pred = fused_pred + xgb_pred * xgb_weight
-            total_weight += xgb_weight
-        if dl_pred is not None and dl_weight > 0:
-            fused_pred = fused_pred + dl_pred * dl_weight
-            total_weight += dl_weight
-        pred = fused_pred / total_weight if total_weight > 0 else baseline_pred
+        # GNN 预测（如可用）
+        gnn_weight = max(float(weights.get("gnn", 0.0)), 0.0)
+        if gnn_weight > 0:
+            gnn_model_path = baseline_model_path.parent / "gnn_model.pt"
+            gnn_meta_path = baseline_model_path.parent / "gnn_meta.json"
+            gnn_pred = predict_with_gnn(
+                gnn_model_path, gnn_meta_path,
+                event_df, feature_df,
+            )
+            if gnn_pred is not None:
+                weighted_preds.append(("gnn", gnn_weight, gnn_pred))
+            else:
+                print("   GNN 权重大于 0，但模型不可用，已跳过")
+
+        if not weighted_preds:
+            raise FileNotFoundError("没有任何可用模型参与融合。")
+
+        total_weight = sum(weight for _, weight, _ in weighted_preds)
+        fused_pred = sum(pred_item * weight for _, weight, pred_item in weighted_preds)
+        pred = fused_pred / total_weight
+        loaded_names = ", ".join(
+            f"{name}:{weight / total_weight:.3f}"
+            for name, weight, _ in weighted_preds
+        )
+        print(f"   已加载模型并归一融合: {loaded_names}")
     except Exception as exc:
         if not args.allow_rule_fallback:
             raise RuntimeError(
