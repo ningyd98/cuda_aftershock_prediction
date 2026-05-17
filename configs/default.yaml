@@ -1,0 +1,29 @@
+paths:
+  base_sequences_csv: ML_Ready_Sequences.csv
+  event_catalog_csv: raw_data/USGS_Mw6.0_Depth70_1970-2023.csv
+  advanced_features_csv: data/processed/advanced_features.csv
+
+phase1:
+  obs_days: 3.0
+  spatial_radius_km: 100.0
+  earth_radius_km: 6371.0
+  gr:
+    mag_col: mag
+    mc: null
+    bin_width: 0.1
+    min_events: 5
+  omori:
+    time_col: time
+    min_events: 8
+    p_bounds: [0.2, 2.5]
+    c_bounds: [0.0001, 10.0]
+    initial_p: 1.0
+    initial_c: 0.05
+    boundary_tol: 0.0001
+    fit_start_day: 0.0
+
+parallel:
+  n_jobs: -1
+  backend: loky
+  verbose: 0
+  max_nbytes: 64M
