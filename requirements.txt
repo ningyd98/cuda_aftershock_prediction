@@ -1,0 +1,14 @@
+numpy
+pandas
+scipy
+PyYAML
+joblib
+tqdm
+requests
+scikit-learn
+geopandas
+shapely
+pyproj
+lightgbm
+xgboost
+torch

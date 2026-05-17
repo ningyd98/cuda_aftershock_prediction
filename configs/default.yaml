@@ -1,6 +1,7 @@
 paths:
-  base_sequences_csv: ML_Ready_Sequences.csv
-  event_catalog_csv: raw_data/USGS_Mw6.0_Depth70_1970-2023.csv
+  base_sequences_csv: data/processed/ML_Ready_Sequences.csv
+  event_catalog_csv: data/raw/USGS_Mw6.0_Depth70_1970-2023.csv
+  plate_boundaries_geojson: data/raw/PB2002_boundaries.json
   advanced_features_csv: data/processed/advanced_features.csv
 
 phase1:

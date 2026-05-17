@@ -4,7 +4,6 @@ import argparse
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import yaml
 from joblib import Parallel, delayed
@@ -14,6 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
 from src.features import estimate_gr_b_value, fit_omori_utsu
+from src.utils import haversine_km
 
 
 def load_config(config_path: Path) -> dict:
@@ -63,27 +63,6 @@ def normalize_event_catalog(raw_df: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(subset=required_cols)
     df = df.sort_values("time").reset_index(drop=True)
     return df
-
-
-def haversine_km(
-    lat1: float,
-    lon1: float,
-    lat2: np.ndarray,
-    lon2: np.ndarray,
-    earth_radius_km: float,
-) -> np.ndarray:
-    """向量化计算两个经纬度点之间的球面距离，单位为公里。"""
-    lat1_rad, lon1_rad = np.radians([lat1, lon1])
-    lat2_rad = np.radians(lat2)
-    lon2_rad = np.radians(lon2)
-
-    dlat = lat2_rad - lat1_rad
-    dlon = lon2_rad - lon1_rad
-    a = (
-        np.sin(dlat / 2.0) ** 2
-        + np.cos(lat1_rad) * np.cos(lat2_rad) * np.sin(dlon / 2.0) ** 2
-    )
-    return earth_radius_km * 2.0 * np.arcsin(np.sqrt(a))
 
 
 def extract_early_aftershocks(
