@@ -166,6 +166,7 @@ step "5. 训练 LightGBM + XGBoost 树模型"
     --n-estimators 300 \
     --learning-rate 0.03 \
     --model-type both \
+    --use-asymmetric-time-objective \
     --save-dir "$MODEL_DIR"
 info "树模型训练完成 ✓"
 

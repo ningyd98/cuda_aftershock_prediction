@@ -16,6 +16,7 @@
 │  src/features.py                                              │
 │  ├── Gutenberg-Richter b 值 (Aki-Utsu MLE)                   │
 │  ├── 大森-宇津定律 p/c/k 参数 (MLE)                          │
+│  ├── Båth's Law 早期最大余震差值                              │
 │  ├── 空间各向异性 (协方差分解)                                │
 │  └── 地质构造特征 (板块边界距离/类型 One-Hot)                │
 ├─────────────────────────────────────────────────────────────┤
@@ -84,6 +85,7 @@ python main.py train-baseline \
     --data data/processed/advanced_features.csv \
     --n-splits 5 \
     --model-type both \
+    --use-asymmetric-time-objective \
     --save-dir data/models
 ```
 
@@ -105,10 +107,11 @@ python main.py make-submission \
 | **目标** | 预测 Mw≥6.0 强震后 30 天内最大余震的震级和时间 |
 | **观测窗口** | 主震后 3 天 (72h) 内的早期余震序列 |
 | **空间窗口** | 主震震中 100 km 半径 |
-| **特征工程** | G-R b值、大森-宇津 p/c/k、空间各向异性、板块构造 |
+| **特征工程** | G-R b值、大森-宇津 p/c/k、Båth's Law、空间各向异性、板块构造 |
 | **验证策略** | 时间序列交叉验证 (TimeSeriesSplit, n=5) |
 | **评估指标** | Mag RMSE/MAE + Time RMSE/MAE + 非对称时间惩罚 (late_weight=2.0) |
-| **Baseline** | LightGBM + XGBoost 多输出回归，基于 OOF 搜索融合权重 |
+| **Baseline** | LightGBM 非对称时间目标 + XGBoost，多输出回归，基于 OOF 搜索融合权重 |
+| **深度模型输入** | 训练集拟合 RobustScaler，领域先验填充 + missing indicator，推理复用同一预处理器 |
 
 ## 目录结构
 
@@ -131,7 +134,7 @@ python main.py make-submission \
 │   └── utils.py                    ← 工具函数
 └── scripts/
     ├── download_usgs.py            ← 下载 USGS Mw≥6.0 目录
-    ├── download_full_catalog.py    ← 下载 USGS Mw≥4.5 目录
+    ├── download_full_catalog.py    ← 下载 USGS Mw≥4.0 目录
     ├── download_pb2002.py          ← 下载板块边界
     ├── build_features.py           ← 并行特征生成
     ├── train_baseline.py           ← Baseline 训练
@@ -144,15 +147,16 @@ python main.py make-submission \
 - ✅ 大森-宇津定律 MLE 参数拟合 (p/c/k)
 - ✅ 空间各向异性 (协方差分解)
 - ✅ 板块构造特征 (PB2002 边界距离 + One-Hot)
+- ✅ Båth's Law 特征 (bath_deficit / bath_early_max_mag / bath_valid)
 - ✅ 时空分箱特征 (1h/6h/12h/24h/72h 频次+能量分布)
 - ✅ 简化 ETAS 模型参数 (μ/K0/α)
 - ✅ 震源机制解特征 (Global CMT: strike/dip/rake, P/T轴, 断层类型)
 - ✅ Gardner & Knopoff 去聚类算法 (src/utils.py)
 - ✅ joblib 并行特征生成
-- ✅ LightGBM + XGBoost Baseline 时间序列 CV
+- ✅ LightGBM 非对称时间目标 + XGBoost Baseline 时间序列 CV
 - ✅ 基于 OOF 的树模型融合权重搜索
-- ✅ Transformer 深度学习模型 (可选训练，双输入融合)
-- ✅ ST-GNN 时空图神经网络 (可选训练，SpatialGraphConv + TemporalGRU)
+- ✅ Transformer 深度学习模型 (可选训练，双输入融合，稳健归一化)
+- ✅ ST-GNN 时空图神经网络 (可选训练，SpatialGraphConv + TemporalGRU，稳健归一化)
 - ✅ 多模型加权融合推理 (默认树模型；DL/GNN 产物存在且权重大于 0 时参与)
 - ✅ 非对称时间惩罚评估指标
 - ✅ 一键运行脚本 (run.sh)

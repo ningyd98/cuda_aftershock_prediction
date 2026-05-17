@@ -1,6 +1,6 @@
 {
-  "baseline": 0.72,
-  "xgboost": 0.28,
+  "baseline": 0.94,
+  "xgboost": 0.06,
   "dl": 0.0,
   "gnn": 0.0
 }

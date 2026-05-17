@@ -15,6 +15,7 @@ sys.path.append(str(PROJECT_ROOT))
 
 from src.features import (
     _load_gcmt_catalog,
+    calculate_bath_law_features,
     calculate_geological_features,
     calculate_spatial_anisotropy,
     calculate_temporal_binned_features,
@@ -151,9 +152,20 @@ def build_one_sequence_features(
             "etas_n": int(len(early_events)), "etas_valid": False,
         }
 
+    early_max_mag = (
+        float(early_events["mag"].max())
+        if "mag" in early_events.columns and not early_events.empty
+        else np.nan
+    )
+    bath_features = calculate_bath_law_features(
+        mainshock_mag=sequence_row.mainshock_mag,
+        early_max_mag=early_max_mag,
+    )
+
     return {
         "mainshock_id": sequence_row.mainshock_id,
         "advanced_early_event_count": int(len(early_events)),
+        **bath_features,
         **gr_features,
         **omori_features,
         **anisotropy_features,

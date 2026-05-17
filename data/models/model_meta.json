@@ -1,7 +1,7 @@
 {
-  "created_at": "2026-05-17T15:36:32.620947+00:00",
+  "created_at": "2026-05-17T16:26:43.808431+00:00",
   "training_data": "/Users/ningyedong/Coding/人工智能导论/余震预测技术国际大赛/data/processed/advanced_features.csv",
-  "feature_count": 48,
+  "feature_count": 51,
   "target_cols": [
     "target_max_mag",
     "target_time_to_max_days"
@@ -9,7 +9,7 @@
   "time_col": "mainshock_time",
   "model_type": "both",
   "model_backends": {
-    "baseline": "lightgbm",
+    "baseline": "lightgbm_asymmetric_time",
     "xgboost": "xgboost"
   },
   "n_splits": 5,
@@ -17,37 +17,38 @@
   "late_weight": 2.0,
   "n_estimators": 300,
   "learning_rate": 0.03,
+  "use_asymmetric_time_objective": true,
   "mean_metrics_by_model": {
     "baseline": {
-      "mag_rmse": 1.3874703255758836,
-      "mag_mae": 0.5859849253766426,
-      "time_rmse": 2.534218003080354,
-      "time_mae": 0.8728876352270987,
-      "time_asymmetric_mae": 1.351143510823756,
-      "time_asymmetric_rmse": 2.753975610392896
+      "mag_rmse": 1.3838151030113628,
+      "mag_mae": 0.5857638885598655,
+      "time_rmse": 2.477317570203517,
+      "time_mae": 0.735497540416999,
+      "time_asymmetric_mae": 1.0645757805316314,
+      "time_asymmetric_rmse": 2.605252234982757
     },
     "xgboost": {
-      "mag_rmse": 1.3790371718923542,
-      "mag_mae": 0.5710657424809382,
-      "time_rmse": 2.6124870106758187,
-      "time_mae": 0.8643593824717403,
-      "time_asymmetric_mae": 1.345876764555794,
-      "time_asymmetric_rmse": 2.9178393976868975
+      "mag_rmse": 1.372138461794017,
+      "mag_mae": 0.5662014401781266,
+      "time_rmse": 2.612866331932552,
+      "time_mae": 0.8612158722251817,
+      "time_asymmetric_mae": 1.3381751167975418,
+      "time_asymmetric_rmse": 2.912981921270538
     }
   },
   "ensemble_weights": {
-    "baseline": 0.72,
-    "xgboost": 0.28,
+    "baseline": 0.94,
+    "xgboost": 0.06,
     "dl": 0.0,
     "gnn": 0.0
   },
   "ensemble_metrics": {
-    "mag_rmse": 1.3752750366603408,
-    "mag_mae": 0.5817758089908925,
-    "time_rmse": 2.555247013778656,
-    "time_mae": 0.8689898407526803,
-    "time_asymmetric_mae": 1.3474039963143494,
-    "time_asymmetric_rmse": 2.7684184503906843,
-    "ensemble_objective": 4.143693487051025
+    "mag_rmse": 1.3812426109297518,
+    "mag_mae": 0.5845855248826162,
+    "time_rmse": 2.512895597827564,
+    "time_mae": 0.7427032757123909,
+    "time_asymmetric_mae": 1.0804856937879372,
+    "time_asymmetric_rmse": 2.6399892993061203,
+    "ensemble_objective": 4.021231910235872
   }
 }

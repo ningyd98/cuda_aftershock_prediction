@@ -71,7 +71,7 @@ def select_feature_cols(df: pd.DataFrame) -> list[str]:
     """筛选数值型特征列（与训练脚本保持一致）。"""
     FEATURE_PREFIXES = (
         "early_", "gr_", "omori_", "anisotropy_", "plate_type_",
-        "count_", "energy_", "etas_",
+        "count_", "energy_", "etas_", "bath_",
     )
     EXPLICIT = {
         "mainshock_mag", "mainshock_depth", "advanced_early_event_count",

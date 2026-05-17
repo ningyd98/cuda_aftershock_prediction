@@ -30,6 +30,7 @@ FEATURE_PREFIXES = (
     "count_",
     "energy_",
     "etas_",
+    "bath_",
 )
 EXPLICIT_FEATURES = {
     "mainshock_mag",
@@ -104,7 +105,11 @@ def build_model(model_name: str, args: argparse.Namespace):
         "learning_rate": args.learning_rate,
     }
     if model_name == "baseline":
-        return BaselineLGBM(**common_kwargs)
+        return BaselineLGBM(
+            **common_kwargs,
+            use_asymmetric_time_objective=args.use_asymmetric_time_objective,
+            late_weight=args.late_weight,
+        )
     if model_name == "xgboost":
         return BaselineXGBoost(**common_kwargs)
     raise ValueError(f"未知模型名称: {model_name}")
@@ -142,6 +147,11 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.02,
         help="LightGBM/XGBoost OOF 融合权重搜索步长",
+    )
+    parser.add_argument(
+        "--use-asymmetric-time-objective",
+        action="store_true",
+        help="LightGBM 时间目标使用预测偏晚惩罚的自定义 MSE objective",
     )
     return parser.parse_args()
 
@@ -344,6 +354,7 @@ def save_training_artifacts(
         "late_weight": args.late_weight,
         "n_estimators": args.n_estimators,
         "learning_rate": args.learning_rate,
+        "use_asymmetric_time_objective": args.use_asymmetric_time_objective,
         "mean_metrics_by_model": mean_metrics_by_model,
         "ensemble_weights": ensemble_weights,
         "ensemble_metrics": ensemble_metrics,

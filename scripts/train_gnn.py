@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import joblib
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -27,7 +28,7 @@ TARGET_COLS = ["target_max_mag", "target_time_to_max_days"]
 TIME_COL = "mainshock_time"
 FEATURE_PREFIXES = (
     "early_", "gr_", "omori_", "anisotropy_", "plate_type_",
-    "count_", "energy_", "etas_",
+    "count_", "energy_", "etas_", "bath_",
 )
 EXPLICIT_FEATURES = {
     "mainshock_mag", "mainshock_depth", "advanced_early_event_count",
@@ -135,23 +136,34 @@ def main():
     global_cols = select_global_feature_cols(df)
     seq_config = SequenceBuildConfig(obs_days=3.0, spatial_radius_km=100.0, max_seq_len=256)
 
-    dataset = EarthquakeSequenceDataset(
-        sequence_df=df, event_catalog_df=event_df,
-        global_feature_cols=global_cols, target_cols=TARGET_COLS, config=seq_config,
-    )
+    n_val = max(1, int(len(df) * 0.2))
+    train_df = df.iloc[:-n_val].copy()
+    val_df = df.iloc[-n_val:].copy()
 
-    n_val = max(1, int(len(dataset) * 0.2))
-    train_set = torch.utils.data.Subset(dataset, list(range(len(dataset) - n_val)))
-    val_set = torch.utils.data.Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
+    train_set = EarthquakeSequenceDataset(
+        sequence_df=train_df, event_catalog_df=event_df,
+        global_feature_cols=global_cols, target_cols=TARGET_COLS, config=seq_config,
+        fit_preprocessors=True, scaler_type="robust",
+    )
+    val_set = EarthquakeSequenceDataset(
+        sequence_df=val_df, event_catalog_df=event_df,
+        global_feature_cols=global_cols, target_cols=TARGET_COLS, config=seq_config,
+        preprocessors=train_set.preprocessors, fit_preprocessors=False,
+    )
 
     train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, collate_fn=earthquake_collate_fn)
     val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, collate_fn=earthquake_collate_fn)
 
-    print(f"训练: {len(train_set)}, 验证: {len(val_set)}, 全局特征: {len(global_cols)}, 事件特征: {len(dataset.event_feature_cols)}")
+    print(
+        f"训练: {len(train_set)}, 验证: {len(val_set)}, "
+        f"全局特征: {len(global_cols)}, 全局输入维: {train_set.global_feature_dim}, "
+        f"缺失指示列: {len(train_set.preprocessors.global_indicator_cols)}, "
+        f"事件特征: {len(train_set.event_feature_cols)}"
+    )
 
     model = STGNNPredictor(
-        event_feature_dim=len(dataset.event_feature_cols),
-        global_feature_dim=len(global_cols),
+        event_feature_dim=len(train_set.event_feature_cols),
+        global_feature_dim=train_set.global_feature_dim,
         node_hidden_dim=args.node_hidden,
         num_gnn_layers=args.gnn_layers,
     ).to(device)
@@ -171,11 +183,15 @@ def main():
             best_mag_rmse = val_metrics["mag_rmse"]
             save_dir.mkdir(parents=True, exist_ok=True)
             torch.save(model.state_dict(), save_dir / "gnn_model.pt")
+            preprocessor_path = save_dir / "gnn_preprocessors.joblib"
+            joblib.dump(train_set.preprocessors, preprocessor_path)
             meta = {
                 "model_class": "STGNNPredictor",
-                "event_feature_dim": len(dataset.event_feature_cols),
-                "global_feature_dim": len(global_cols),
+                "event_feature_dim": len(train_set.event_feature_cols),
+                "global_feature_dim": train_set.global_feature_dim,
                 "global_feature_cols": global_cols,
+                "global_indicator_cols": train_set.preprocessors.global_indicator_cols,
+                "preprocessor_path": preprocessor_path.name,
                 "node_hidden_dim": args.node_hidden,
                 "num_gnn_layers": args.gnn_layers,
                 "trained_at": datetime.now(timezone.utc).isoformat(),

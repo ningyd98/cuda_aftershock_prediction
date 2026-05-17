@@ -9,6 +9,7 @@ python scripts/train_baseline.py \
   --data data/processed/advanced_features.csv \
   --n-splits 5 \
   --model-type both \
+  --use-asymmetric-time-objective \
   --save-dir data/models
 python scripts/make_submission.py \
   --input "$INPUT" \

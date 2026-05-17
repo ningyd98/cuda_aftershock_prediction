@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import joblib
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -35,6 +36,7 @@ FEATURE_PREFIXES = (
     "count_",
     "energy_",
     "etas_",
+    "bath_",
 )
 EXPLICIT_FEATURES = {
     "mainshock_mag",
@@ -138,19 +140,13 @@ def evaluate_model(
 
 
 def time_series_train_val_split(
-    dataset: EarthquakeSequenceDataset,
+    df: pd.DataFrame,
     val_ratio: float = 0.2,
-) -> tuple[torch.utils.data.Subset, torch.utils.data.Subset]:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """按时间排序后取最后 val_ratio 作为验证集。"""
-    n = len(dataset)
+    n = len(df)
     n_val = max(1, int(n * val_ratio))
-    indices = list(range(n))
-    train_indices = indices[:-n_val]
-    val_indices = indices[-n_val:]
-    return (
-        torch.utils.data.Subset(dataset, train_indices),
-        torch.utils.data.Subset(dataset, val_indices),
-    )
+    return df.iloc[:-n_val].copy(), df.iloc[-n_val:].copy()
 
 
 def parse_args() -> argparse.Namespace:
@@ -204,31 +200,44 @@ def main() -> None:
 
     seq_config = SequenceBuildConfig(obs_days=3.0, spatial_radius_km=100.0, max_seq_len=256)
 
-    dataset = EarthquakeSequenceDataset(
-        sequence_df=df,
+    train_df, val_df = time_series_train_val_split(df, val_ratio=0.2)
+    train_dataset = EarthquakeSequenceDataset(
+        sequence_df=train_df,
         event_catalog_df=event_df,
         global_feature_cols=global_cols,
         target_cols=TARGET_COLS,
         config=seq_config,
+        fit_preprocessors=True,
+        scaler_type="robust",
     )
-    train_subset, val_subset = time_series_train_val_split(dataset, val_ratio=0.2)
+    val_dataset = EarthquakeSequenceDataset(
+        sequence_df=val_df,
+        event_catalog_df=event_df,
+        global_feature_cols=global_cols,
+        target_cols=TARGET_COLS,
+        config=seq_config,
+        preprocessors=train_dataset.preprocessors,
+        fit_preprocessors=False,
+    )
 
     train_loader = DataLoader(
-        train_subset, batch_size=args.batch_size, shuffle=True,
+        train_dataset, batch_size=args.batch_size, shuffle=True,
         collate_fn=earthquake_collate_fn, num_workers=0,
     )
     val_loader = DataLoader(
-        val_subset, batch_size=args.batch_size, shuffle=False,
+        val_dataset, batch_size=args.batch_size, shuffle=False,
         collate_fn=earthquake_collate_fn, num_workers=0,
     )
 
-    print(f"训练样本: {len(train_subset)}, 验证样本: {len(val_subset)}")
+    print(f"训练样本: {len(train_dataset)}, 验证样本: {len(val_dataset)}")
     print(f"全局特征数: {len(global_cols)}")
-    print(f"事件特征维: {len(dataset.event_feature_cols)}")
+    print(f"全局输入维: {train_dataset.global_feature_dim}")
+    print(f"缺失指示列数: {len(train_dataset.preprocessors.global_indicator_cols)}")
+    print(f"事件特征维: {len(train_dataset.event_feature_cols)}")
 
     model = Seq2SeqAftershockPredictor(
-        event_feature_dim=len(dataset.event_feature_cols),
-        global_feature_dim=len(global_cols),
+        event_feature_dim=len(train_dataset.event_feature_cols),
+        global_feature_dim=train_dataset.global_feature_dim,
         d_model=args.d_model,
         nhead=args.nhead,
         num_layers=args.num_layers,
@@ -249,11 +258,15 @@ def main() -> None:
             best_val_mag_rmse = val_metrics["mag_rmse"]
             save_dir.mkdir(parents=True, exist_ok=True)
             torch.save(model.state_dict(), save_dir / "dl_model.pt")
+            preprocessor_path = save_dir / "dl_preprocessors.joblib"
+            joblib.dump(train_dataset.preprocessors, preprocessor_path)
             dl_meta = {
                 "model_class": "Seq2SeqAftershockPredictor",
-                "event_feature_dim": len(dataset.event_feature_cols),
-                "global_feature_dim": len(global_cols),
+                "event_feature_dim": len(train_dataset.event_feature_cols),
+                "global_feature_dim": train_dataset.global_feature_dim,
                 "global_feature_cols": global_cols,
+                "global_indicator_cols": train_dataset.preprocessors.global_indicator_cols,
+                "preprocessor_path": preprocessor_path.name,
                 "d_model": args.d_model,
                 "nhead": args.nhead,
                 "num_layers": args.num_layers,

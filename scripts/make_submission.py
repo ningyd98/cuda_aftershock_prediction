@@ -13,6 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
 from src.features import (
+    calculate_bath_law_features,
     calculate_geological_features,
     calculate_spatial_anisotropy,
     calculate_temporal_binned_features,
@@ -133,6 +134,7 @@ def build_single_sequence_features(
     )
 
     early_mags = early_events["mag"].astype(float)
+    early_max_mag = float(early_mags.max()) if len(early_mags) else np.nan
     mainshock_id = str(mainshock.get("id", mainshock["time"].strftime("%Y%m%d%H%M%S")))
 
     base_features = {
@@ -143,7 +145,7 @@ def build_single_sequence_features(
         "mainshock_mag": float(mainshock["mag"]),
         "mainshock_depth": float(mainshock["depth"]),
         "early_aftershock_count": int(len(early_events)),
-        "early_max_mag": float(early_mags.max()) if len(early_mags) else 0.0,
+        "early_max_mag": early_max_mag if np.isfinite(early_max_mag) else 0.0,
         "early_mean_mag": float(early_mags.mean()) if len(early_mags) else 0.0,
         "early_energy_sum": float(seismic_moment_from_mw(early_mags).sum())
         if len(early_mags)
@@ -153,6 +155,12 @@ def build_single_sequence_features(
         "target_time_to_max_days": np.nan,
         "advanced_early_event_count": int(len(early_events)),
     }
+    base_features.update(
+        calculate_bath_law_features(
+            mainshock_mag=float(mainshock["mag"]),
+            early_max_mag=early_max_mag,
+        )
+    )
     base_features.update(estimate_gr_b_value(early_events))
     base_features.update(
         fit_omori_utsu(
@@ -243,6 +251,17 @@ def configure_torch_inference_threads(torch_module) -> None:
         pass
 
 
+def load_dataset_preprocessors(meta: dict, meta_path: Path, default_name: str):
+    """加载深度模型训练时保存的 Dataset 预处理器。"""
+    preprocessor_name = meta.get("preprocessor_path", default_name)
+    preprocessor_path = Path(preprocessor_name)
+    if not preprocessor_path.is_absolute():
+        preprocessor_path = meta_path.parent / preprocessor_path
+    if not preprocessor_path.exists():
+        return None
+    return joblib.load(preprocessor_path)
+
+
 def predict_with_dl(
     dl_model_path: Path,
     dl_meta_path: Path,
@@ -263,6 +282,14 @@ def predict_with_dl(
 
         with open(dl_meta_path, "r") as f:
             dl_meta = json.load(f)
+        preprocessors = load_dataset_preprocessors(
+            dl_meta,
+            dl_meta_path,
+            default_name="dl_preprocessors.joblib",
+        )
+        if preprocessors is None:
+            print("   DL 预处理器缺失，已跳过该模型")
+            return None
 
         from src.models_dl import Seq2SeqAftershockPredictor
         from src.dataset import EarthquakeSequenceDataset, SequenceBuildConfig
@@ -285,6 +312,8 @@ def predict_with_dl(
             event_catalog_df=event_df,
             global_feature_cols=dl_meta["global_feature_cols"],
             config=seq_config,
+            preprocessors=preprocessors,
+            fit_preprocessors=False,
         )
         from src.dataset import earthquake_collate_fn
 
@@ -319,6 +348,14 @@ def predict_with_gnn(
 
         with gnn_meta_path.open("r", encoding="utf-8") as file:
             gnn_meta = json.load(file)
+        preprocessors = load_dataset_preprocessors(
+            gnn_meta,
+            gnn_meta_path,
+            default_name="gnn_preprocessors.joblib",
+        )
+        if preprocessors is None:
+            print("   GNN 预处理器缺失，已跳过该模型")
+            return None
 
         from src.dataset import (
             EarthquakeSequenceDataset,
@@ -343,6 +380,8 @@ def predict_with_gnn(
             event_catalog_df=event_df,
             global_feature_cols=gnn_meta["global_feature_cols"],
             config=seq_config,
+            preprocessors=preprocessors,
+            fit_preprocessors=False,
         )
         batch = earthquake_collate_fn([dataset[0]])
 

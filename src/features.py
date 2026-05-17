@@ -52,6 +52,37 @@ def _empty_anisotropy_result(n_events: int) -> dict:
     }
 
 
+def calculate_bath_law_features(
+    mainshock_mag: float,
+    early_max_mag: float | None,
+) -> dict:
+    """
+    计算 Båth's Law 相关特征。
+
+    Båth's Law 经验上认为最大余震震级通常比主震低约 1.2 级。
+    这里用主震震级与观测窗口内最大早期余震震级的差值，刻画序列
+    已经释放出的最大余震强度缺口。
+    """
+    main_mag = float(mainshock_mag)
+    early_mag = np.nan if early_max_mag is None else float(early_max_mag)
+    valid = bool(np.isfinite(main_mag) and np.isfinite(early_mag) and early_mag > 0)
+
+    if valid:
+        bath_deficit = main_mag - early_mag
+        bath_early_max_mag = early_mag
+    else:
+        bath_deficit = main_mag if np.isfinite(main_mag) else np.nan
+        bath_early_max_mag = np.nan
+
+    return {
+        "bath_deficit": float(bath_deficit),
+        "bath_early_max_mag": float(bath_early_max_mag)
+        if np.isfinite(bath_early_max_mag)
+        else np.nan,
+        "bath_valid": valid,
+    }
+
+
 def estimate_mc_maxc(magnitudes: np.ndarray, bin_width: float = 0.1) -> float:
     """
     使用最大曲率法 MAXC 估计完整性震级 Mc。
