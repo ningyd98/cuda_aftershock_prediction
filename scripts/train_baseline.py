@@ -60,6 +60,7 @@ EXCLUDE_COLS = {
     "mainshock_lat",
     "mainshock_lon",
     "nearest_plate_boundary_type",
+    "has_target_aftershock",
     *TARGET_COLS,
 }
 MODEL_FILE_NAMES = {
@@ -101,7 +102,12 @@ def prepare_training_frame(df: pd.DataFrame) -> pd.DataFrame:
         errors="coerce",
         format="mixed",
     )
-    return cleaned_df.dropna(subset=[TIME_COL, *TARGET_COLS]).reset_index(drop=True)
+    before = len(cleaned_df)
+    cleaned_df = cleaned_df.dropna(subset=[TIME_COL, *TARGET_COLS]).reset_index(drop=True)
+    after = len(cleaned_df)
+    if after < before:
+        print(f"训练数据过滤: {before} → {after} 条 (剔除无未来余震的 NaN 目标样本)")
+    return cleaned_df
 
 
 def requested_model_names(model_type: str) -> list[str]:
@@ -170,6 +176,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="LightGBM 时间目标使用预测偏晚惩罚的自定义 MSE objective",
     )
+    parser.add_argument(
+        "--purge-days",
+        type=float,
+        default=30.0,
+        help="每折训练集中剔除距离验证集开始时间不足此天数的样本 (默认 30)",
+    )
     return parser.parse_args()
 
 
@@ -185,6 +197,8 @@ def run_oof_cv(
     X = train_df[feature_cols]
     y = train_df[TARGET_COLS]
 
+    purge_delta = pd.Timedelta(days=float(getattr(args, "purge_days", 30.0)))
+
     oof_preds = {
         model_name: np.full((len(train_df), len(TARGET_COLS)), np.nan, dtype=float)
         for model_name in model_names
@@ -197,9 +211,20 @@ def run_oof_cv(
         if valid_start_time <= train_end_time:
             raise RuntimeError("时间序列切分异常：验证集时间未晚于训练集。")
 
+        # ---- purge: 剔除训练集中距验证集开始时间不足 purge_days 的样本 ----
+        purge_cutoff = valid_start_time - purge_delta
+        purge_mask = train_df.loc[train_idx, TIME_COL] <= purge_cutoff
+        train_idx_purged = train_idx[purge_mask.values]
+        if len(train_idx_purged) < max(10, len(train_idx) * 0.3):
+            print(
+                f"  警告: fold {fold_idx} purge 后训练样本仅 {len(train_idx_purged)}，"
+                f"跳过 purge"
+            )
+            train_idx_purged = train_idx
+
         for model_name in model_names:
             model = build_model(model_name, args)
-            model.fit(X.iloc[train_idx], y.iloc[train_idx])
+            model.fit(X.iloc[train_idx_purged], y.iloc[train_idx_purged])
             preds = np.asarray(model.predict(X.iloc[valid_idx]), dtype=float)
             preds = np.clip(preds, a_min=0.0, a_max=None)
             oof_preds[model_name][valid_idx] = preds
@@ -216,10 +241,11 @@ def run_oof_cv(
                     "fold": fold_idx,
                     "model": model_name,
                     "backend": getattr(model, "backend", model.__class__.__name__),
-                    "train_size": int(len(train_idx)),
+                    "train_size": int(len(train_idx_purged)),
                     "valid_size": int(len(valid_idx)),
-                    "train_start": str(train_df.loc[train_idx[0], TIME_COL])[:10],
-                    "train_end": str(train_end_time)[:10],
+                    "purge_days": float(getattr(args, "purge_days", 30.0)),
+                    "train_start": str(train_df.loc[train_idx_purged[0], TIME_COL])[:10],
+                    "train_end": str(train_df.loc[train_idx_purged[-1], TIME_COL])[:10],
                     "valid_start": str(valid_start_time)[:10],
                     "valid_end": str(train_df.loc[valid_idx[-1], TIME_COL])[:10],
                     **metrics,
@@ -368,6 +394,7 @@ def save_training_artifacts(
         "model_type": args.model_type,
         "model_backends": model_backends,
         "n_splits": args.n_splits,
+        "purge_days": float(getattr(args, "purge_days", 30.0)),
         "seed": args.seed,
         "late_weight": args.late_weight,
         "n_estimators": args.n_estimators,

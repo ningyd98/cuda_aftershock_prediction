@@ -199,6 +199,7 @@ def build_single_sequence_features(
         estimate_etas_parameters(
             early_events,
             mainshock_time=mainshock["time"],
+            mainshock_mag=float(mainshock["mag"]),
             obs_days=obs_days,
         )
     )
@@ -238,6 +239,55 @@ def make_model_matrix(feature_df: pd.DataFrame, feature_cols: list[str]) -> pd.D
             model_df[col] = model_df[col].astype(int)
         model_df[col] = pd.to_numeric(model_df[col], errors="coerce")
     return model_df[feature_cols]
+
+
+def check_feature_consistency(
+    feature_df: pd.DataFrame,
+    feature_cols: list[str],
+    max_missing_ratio: float = 0.30,
+    strict: bool = False,
+) -> None:
+    """
+    训练/推理特征一致性检查。
+
+    统计缺失的训练特征列和额外推理特征列。
+    若缺失比例超过 max_missing_ratio 或 strict=True 时任意缺失，则报错。
+    """
+    inference_cols = set(feature_df.columns)
+    training_cols = set(feature_cols)
+
+    missing_from_inference = sorted(training_cols - inference_cols)
+    extra_in_inference = sorted(inference_cols - training_cols - {
+        "mainshock_id", "mainshock_time",
+        "mainshock_lat", "mainshock_lon",
+        "target_max_mag", "target_time_to_max_days",
+        "nearest_plate_boundary_type",
+    })
+
+    if not missing_from_inference and not extra_in_inference:
+        print(f"   ✓ 特征一致性检查通过 (训练特征 {len(feature_cols)} 列全部可用)")
+        return
+
+    missing_ratio = len(missing_from_inference) / max(len(feature_cols), 1)
+
+    if missing_from_inference:
+        print(f"   ⚠ 推理时缺失 {len(missing_from_inference)} 列训练特征 "
+              f"({missing_ratio:.1%}):")
+        for col in missing_from_inference[:8]:
+            print(f"      - {col}")
+        if len(missing_from_inference) > 8:
+            print(f"      ... 等 {len(missing_from_inference) - 8} 列")
+
+    if extra_in_inference:
+        print(f"   ℹ 推理时有 {len(extra_in_inference)} 列额外特征 "
+              f"(训练时不存在，将被忽略)")
+
+    if missing_ratio > max_missing_ratio or (strict and missing_from_inference):
+        raise RuntimeError(
+            f"特征一致性检查失败: 缺失 {len(missing_from_inference)}/"
+            f"{len(feature_cols)} 训练特征 ({missing_ratio:.1%})。"
+            f"阈值: {max_missing_ratio:.0%}。请检查特征提取配置是否与训练时一致。"
+        )
 
 
 def load_ensemble_weights(path: Path | None) -> dict:
@@ -555,6 +605,7 @@ def main() -> None:
 
     try:
         feature_cols = load_feature_cols(feature_cols_path)
+        check_feature_consistency(feature_df, feature_cols)
         X = make_model_matrix(feature_df, feature_cols)
         weights = load_ensemble_weights(ensemble_weights_path)
 

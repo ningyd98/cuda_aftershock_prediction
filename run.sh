@@ -7,6 +7,8 @@
 #    ./run.sh --skip-download --with-dl    # 额外训练 Transformer
 #    ./run.sh --skip-download --with-gnn   # 额外训练 ST-GNN
 #    ./run.sh --skip-download --with-deep  # 同时训练 Transformer + ST-GNN
+#    ./run.sh --no-install                 # 跳过 pip install（依赖已就绪）
+#    ./run.sh --install                    # 强制重新安装依赖
 #    ./run.sh train-only                   # 只重训模型并重新生成提交
 # ============================================================
 
@@ -56,6 +58,8 @@ WITH_DL=false
 WITH_GNN=false
 WITH_GCMT=false
 MOCK_EVAL=false
+NO_INSTALL=false
+FORCE_INSTALL=false
 
 for arg in "$@"; do
     case "$arg" in
@@ -69,6 +73,8 @@ for arg in "$@"; do
         --with-deep) WITH_DL=true; WITH_GNN=true ;;
         --with-gcmt) WITH_GCMT=true ;;
         --mock-eval) MOCK_EVAL=true ;;
+        --no-install) NO_INSTALL=true ;;
+        --install) FORCE_INSTALL=true ;;
         train-only) TRAIN_ONLY=true ;;
         -h|--help) show_usage; exit 0 ;;
         *) error "未知参数: $arg" ;;
@@ -98,8 +104,17 @@ step "0. 环境检查"
 info "Python: ${PYTHON}"
 
 step "1. 安装 Python 依赖"
-"${PYTHON}" -m pip install -r requirements.txt -q
-info "依赖安装完成 ✓"
+if [ "$FORCE_INSTALL" = true ]; then
+    info "强制重新安装依赖..."
+    "${PYTHON}" -m pip install -r requirements.txt
+elif [ "$NO_INSTALL" = true ]; then
+    info "跳过依赖安装 (--no-install)"
+else
+    info "检查依赖..."
+    "${PYTHON}" -c "import numpy, pandas, scipy, yaml, joblib, tqdm, requests, sklearn, lightgbm, xgboost, torch" 2>/dev/null && \
+        info "依赖已就绪 ✓" || \
+        { warn "依赖缺失，自动安装..."; "${PYTHON}" -m pip install -r requirements.txt -q; info "依赖安装完成 ✓"; }
+fi
 
 if [ "$TRAIN_ONLY" = false ] && [ "$SKIP_DOWNLOAD" = false ]; then
     step "2. 下载数据"

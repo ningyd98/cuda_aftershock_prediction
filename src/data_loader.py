@@ -86,20 +86,17 @@ def build_earthquake_sequences(
         early_aftershocks = aftershocks.loc[aftershocks["time"] <= obs_end_time]
         future_aftershocks = aftershocks.loc[aftershocks["time"] > obs_end_time]
 
-        if future_aftershocks.empty:
-            max_aftershock_mag = 0.0
-            time_to_max = 0.0
-        else:
-            max_idx = future_aftershocks["mag"].idxmax()
-            max_aftershock = future_aftershocks.loc[max_idx]
-            max_aftershock_mag = float(max_aftershock["mag"])
-            time_to_max = (
-                max_aftershock["time"] - obs_end_time
-            ).total_seconds() / 86400.0
-
         early_mags = early_aftershocks["mag"].astype(float)
-        sequence_data.append(
-            {
+        early_max_mag = float(early_mags.max()) if len(early_mags) else np.nan
+        early_mean_mag = float(early_mags.mean()) if len(early_mags) else np.nan
+        early_energy = (
+            float(seismic_moment_from_mw(early_mags).sum())
+            if len(early_mags)
+            else 0.0
+        )
+
+        if future_aftershocks.empty:
+            record = {
                 "mainshock_id": mainshock["id"],
                 "mainshock_time": ms_time,
                 "mainshock_lat": ms_lat,
@@ -107,15 +104,36 @@ def build_earthquake_sequences(
                 "mainshock_mag": float(mainshock["mag"]),
                 "mainshock_depth": float(mainshock["depth"]),
                 "early_aftershock_count": int(len(early_aftershocks)),
-                "early_max_mag": float(early_mags.max()) if len(early_mags) else 0.0,
-                "early_mean_mag": float(early_mags.mean()) if len(early_mags) else 0.0,
-                "early_energy_sum": float(seismic_moment_from_mw(early_mags).sum())
-                if len(early_mags)
-                else 0.0,
+                "early_max_mag": early_max_mag if np.isfinite(early_max_mag) else 0.0,
+                "early_mean_mag": early_mean_mag if np.isfinite(early_mean_mag) else 0.0,
+                "early_energy_sum": early_energy,
+                "has_target_aftershock": False,
+                "target_max_mag": np.nan,
+                "target_time_to_max_days": np.nan,
+            }
+        else:
+            max_idx = future_aftershocks["mag"].idxmax()
+            max_aftershock = future_aftershocks.loc[max_idx]
+            max_aftershock_mag = float(max_aftershock["mag"])
+            time_to_max = (
+                max_aftershock["time"] - obs_end_time
+            ).total_seconds() / 86400.0
+            record = {
+                "mainshock_id": mainshock["id"],
+                "mainshock_time": ms_time,
+                "mainshock_lat": ms_lat,
+                "mainshock_lon": ms_lon,
+                "mainshock_mag": float(mainshock["mag"]),
+                "mainshock_depth": float(mainshock["depth"]),
+                "early_aftershock_count": int(len(early_aftershocks)),
+                "early_max_mag": early_max_mag if np.isfinite(early_max_mag) else 0.0,
+                "early_mean_mag": early_mean_mag if np.isfinite(early_mean_mag) else 0.0,
+                "early_energy_sum": early_energy,
+                "has_target_aftershock": True,
                 "target_max_mag": max_aftershock_mag,
                 "target_time_to_max_days": float(time_to_max),
             }
-        )
+        sequence_data.append(record)
 
     print("3. 序列化完成！")
     return pd.DataFrame(sequence_data)

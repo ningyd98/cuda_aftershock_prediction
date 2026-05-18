@@ -390,6 +390,7 @@ def _empty_etas_result(n_events: int) -> dict:
 def estimate_etas_parameters(
     events: pd.DataFrame,
     mainshock_time,
+    mainshock_mag: float | None = None,
     time_col: str = "time",
     mag_col: str = "mag",
     obs_days: float = 3.0,
@@ -402,6 +403,8 @@ def estimate_etas_parameters(
     简化 ETAS (Epidemic Type Aftershock Sequence) 模型参数估计 (优化版)。
 
     对于超过 max_events 的序列做随机下采样以控制拟合时间。
+    mainshock_mag 参数接收真实主震震级；若未传入则回退到早期余震
+    最大震级（保持向后兼容）。
     """
     if events.empty or time_col not in events.columns:
         return _empty_etas_result(0)
@@ -452,8 +455,12 @@ def estimate_etas_parameters(
     # 强度函数: λ(t,m) = μ + Σ K0 * exp(α*(Mi-Mc)) / (t-ti + c)^p
     # 简化为仅用主震贡献: λ(t) ≈ μ + K0 * exp(α*(M0-Mc)) / (t + c)^p
 
-    mainshock_mag = float(mags_in_window.max()) if len(mags_in_window) > 0 else mc + 1.0
-    mag_factor = np.exp(beta * (mainshock_mag - mc))
+    # 优先使用显式传入的真实主震震级，回退到早期余震最大震级
+    if mainshock_mag is not None and np.isfinite(mainshock_mag):
+        _mainshock_mag = float(mainshock_mag)
+    else:
+        _mainshock_mag = float(mags_in_window.max()) if len(mags_in_window) > 0 else mc + 1.0
+    mag_factor = np.exp(beta * (_mainshock_mag - mc))
 
     # 先拟合大森定律获取 p, c
     omori_result = fit_omori_utsu(
@@ -493,7 +500,7 @@ def estimate_etas_parameters(
         if mu <= 0 or K0 <= 0:
             return np.inf
 
-        A = K0 * np.exp(alpha * (mainshock_mag - mc))
+        A = K0 * np.exp(alpha * (_mainshock_mag - mc))
         integ_bg = mu * obs_days
         integ_triggered = A * omori_integral(0.0, obs_days, p_hat, c_hat)
         total_integ = integ_bg + integ_triggered
@@ -955,9 +962,10 @@ def match_focal_mechanism(
     if not in_range.any():
         return empty
 
-    # 距离最近的匹配
-    best_idx = np.argmin(dists)
-    row = candidates.iloc[best_idx]
+    # 仅在空间范围内选择距离最近的候选
+    in_range_indices = np.where(in_range)[0]
+    best_local_idx = in_range_indices[np.argmin(dists[in_range])]
+    row = candidates.iloc[best_local_idx]
 
     ft = str(row.get("fault_type", "UNK"))
     fault_types = {"NF", "SS", "TF", "UNK"}

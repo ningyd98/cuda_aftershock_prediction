@@ -168,6 +168,7 @@ def build_one_sequence_features(
         etas_features = estimate_etas_parameters(
             early_events,
             mainshock_time=sequence_row.mainshock_time,
+            mainshock_mag=sequence_row.mainshock_mag,
             obs_days=phase1_cfg["obs_days"],
         )
     except Exception:
