@@ -37,12 +37,26 @@ FEATURE_PREFIXES = (
     "energy_",
     "etas_",
     "bath_",
+    "fault_type_",
+    "productivity_",
 )
 EXPLICIT_FEATURES = {
     "mainshock_mag",
     "mainshock_depth",
     "advanced_early_event_count",
     "plate_boundary_distance_km",
+    "strike1",
+    "dip1",
+    "rake1",
+    "strike2",
+    "dip2",
+    "rake2",
+    "plunge_P",
+    "trend_P",
+    "plunge_T",
+    "trend_T",
+    "f_clvd",
+    "focal_mechanism_valid",
 }
 EXCLUDE_COLS = {
     "mainshock_id",

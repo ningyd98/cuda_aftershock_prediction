@@ -28,11 +28,14 @@ TARGET_COLS = ["target_max_mag", "target_time_to_max_days"]
 TIME_COL = "mainshock_time"
 FEATURE_PREFIXES = (
     "early_", "gr_", "omori_", "anisotropy_", "plate_type_",
-    "count_", "energy_", "etas_", "bath_",
+    "count_", "energy_", "etas_", "bath_", "fault_type_", "productivity_",
 )
 EXPLICIT_FEATURES = {
     "mainshock_mag", "mainshock_depth", "advanced_early_event_count",
     "plate_boundary_distance_km",
+    "strike1", "dip1", "rake1", "strike2", "dip2", "rake2",
+    "plunge_P", "trend_P", "plunge_T", "trend_T", "f_clvd",
+    "focal_mechanism_valid",
 }
 EXCLUDE_COLS = {
     "mainshock_id", "mainshock_time", "mainshock_lat", "mainshock_lon",

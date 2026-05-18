@@ -71,11 +71,14 @@ def select_feature_cols(df: pd.DataFrame) -> list[str]:
     """筛选数值型特征列（与训练脚本保持一致）。"""
     FEATURE_PREFIXES = (
         "early_", "gr_", "omori_", "anisotropy_", "plate_type_",
-        "count_", "energy_", "etas_", "bath_",
+        "count_", "energy_", "etas_", "bath_", "fault_type_", "productivity_",
     )
     EXPLICIT = {
         "mainshock_mag", "mainshock_depth", "advanced_early_event_count",
         "plate_boundary_distance_km",
+        "strike1", "dip1", "rake1", "strike2", "dip2", "rake2",
+        "plunge_P", "trend_P", "plunge_T", "trend_T", "f_clvd",
+        "focal_mechanism_valid",
     }
     EXCLUDE = {
         "mainshock_id", "mainshock_time", "mainshock_lat", "mainshock_lon",

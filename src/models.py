@@ -6,20 +6,64 @@ import numpy as np
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.multioutput import MultiOutputRegressor
 
+TIME_TARGET_INDEX = 1
+
+
+def transform_targets_for_fit(y, transform_time_target: bool = True) -> np.ndarray:
+    """训练前对时间目标做 log1p；震级目标保持原尺度。"""
+    y_array = np.asarray(y, dtype=float).copy()
+    if transform_time_target:
+        y_array[:, TIME_TARGET_INDEX] = np.log1p(
+            np.clip(y_array[:, TIME_TARGET_INDEX], a_min=0.0, a_max=None)
+        )
+    return y_array
+
+
+def inverse_transform_model_predictions(
+    preds,
+    transform_time_target: bool = True,
+) -> np.ndarray:
+    """模型预测后将时间目标还原为真实天数尺度。"""
+    pred_array = np.asarray(preds, dtype=float).copy()
+    if transform_time_target:
+        pred_array[:, TIME_TARGET_INDEX] = np.expm1(
+            np.clip(pred_array[:, TIME_TARGET_INDEX], a_min=-50.0, a_max=50.0)
+        )
+    pred_array[:, TIME_TARGET_INDEX] = np.clip(
+        pred_array[:, TIME_TARGET_INDEX],
+        a_min=0.0,
+        a_max=None,
+    )
+    return pred_array
+
 
 def asymmetric_mse_objective(
     y_true,
     y_pred,
     late_weight: float = 2.0,
+    log_space: bool = True,
 ):
     """
     LightGBM 自定义非对称 MSE 目标。
 
-    当 y_pred > y_true 时，表示预测时间晚于实际时间，梯度和 Hessian
-    乘以 late_weight；预测偏早则保持普通 MSE。
+    默认 y_true/y_pred 为 log1p(time) 尺度；先还原到真实天数判断
+    “预测偏晚”，再通过链式法则返回相对 log-pred 的梯度和 Hessian。
     """
     true = np.asarray(y_true, dtype=float)
     pred = np.asarray(y_pred, dtype=float)
+    if log_space:
+        true_log = np.clip(true, a_min=-50.0, a_max=50.0)
+        pred_log = np.clip(pred, a_min=-50.0, a_max=50.0)
+        true_time = np.expm1(true_log)
+        pred_time = np.expm1(pred_log)
+        error = pred_time - true_time
+        jacobian = np.exp(pred_log)
+        weights = np.where(error > 0.0, float(late_weight), 1.0)
+        grad = 2.0 * weights * error * jacobian
+        # 使用正定 Gauss-Newton Hessian 近似，避免极端负误差导致 Hessian 非正。
+        hess = 2.0 * weights * np.square(jacobian)
+        return grad, np.clip(hess, a_min=1e-6, a_max=None)
+
     error = pred - true
     weights = np.where(error > 0.0, float(late_weight), 1.0)
     grad = 2.0 * weights * error
@@ -32,12 +76,14 @@ class AsymmetricTimeObjective:
     """可序列化的 LightGBM 自定义目标包装器。"""
 
     late_weight: float = 2.0
+    log_space: bool = True
 
     def __call__(self, y_true, y_pred):
         return asymmetric_mse_objective(
             y_true=y_true,
             y_pred=y_pred,
             late_weight=self.late_weight,
+            log_space=self.log_space,
         )
 
 
@@ -59,6 +105,7 @@ class BaselineLGBM:
         n_jobs: int = -1,
         use_asymmetric_time_objective: bool = False,
         late_weight: float = 2.0,
+        transform_time_target: bool = True,
         **model_kwargs,
     ) -> None:
         self.random_state = random_state
@@ -69,6 +116,7 @@ class BaselineLGBM:
         self.n_jobs = n_jobs
         self.use_asymmetric_time_objective = use_asymmetric_time_objective
         self.late_weight = late_weight
+        self.transform_time_target = transform_time_target
         self.model_kwargs = model_kwargs
         self.backend = "lightgbm"
         self.model = self._build_model()
@@ -92,7 +140,10 @@ class BaselineLGBM:
                     **self.model_kwargs,
                 )
                 self.time_model = LGBMRegressor(
-                    objective=AsymmetricTimeObjective(late_weight=self.late_weight),
+                    objective=AsymmetricTimeObjective(
+                        late_weight=self.late_weight,
+                        log_space=self.transform_time_target,
+                    ),
                     n_estimators=self.n_estimators,
                     learning_rate=self.learning_rate,
                     num_leaves=self.num_leaves,
@@ -132,25 +183,35 @@ class BaselineLGBM:
     def fit(self, X, y):
         """训练多目标回归模型。"""
         use_asymmetric = getattr(self, "use_asymmetric_time_objective", False)
+        transform_time = getattr(self, "transform_time_target", False)
+        y_array = transform_targets_for_fit(y, transform_time_target=transform_time)
         if use_asymmetric and self.backend == "lightgbm_asymmetric_time":
-            y_array = np.asarray(y, dtype=float)
             if y_array.ndim != 2 or y_array.shape[1] != 2:
                 raise ValueError("BaselineLGBM 自定义时间目标要求 y 为两列：[震级, 时间]。")
             self.mag_model.fit(X, y_array[:, 0])
             self.time_model.fit(X, y_array[:, 1])
             return self
 
-        self.model.fit(X, y)
+        self.model.fit(X, y_array)
         return self
 
     def predict(self, X):
         """预测最大余震震级和发生时间。"""
         use_asymmetric = getattr(self, "use_asymmetric_time_objective", False)
+        transform_time = getattr(self, "transform_time_target", False)
         if use_asymmetric and self.backend == "lightgbm_asymmetric_time":
             mag_pred = np.asarray(self.mag_model.predict(X), dtype=float)
             time_pred = np.asarray(self.time_model.predict(X), dtype=float)
-            return np.column_stack([mag_pred, time_pred])
-        return self.model.predict(X)
+            raw_preds = np.column_stack([mag_pred, time_pred])
+            return inverse_transform_model_predictions(
+                raw_preds,
+                transform_time_target=transform_time,
+            )
+        raw_preds = self.model.predict(X)
+        return inverse_transform_model_predictions(
+            raw_preds,
+            transform_time_target=transform_time,
+        )
 
 
 class BaselineXGBoost:
@@ -171,6 +232,7 @@ class BaselineXGBoost:
         reg_alpha: float = 0.1,
         reg_lambda: float = 1.0,
         n_jobs: int = -1,
+        transform_time_target: bool = True,
         **model_kwargs,
     ) -> None:
         self.random_state = random_state
@@ -182,6 +244,7 @@ class BaselineXGBoost:
         self.reg_alpha = reg_alpha
         self.reg_lambda = reg_lambda
         self.n_jobs = n_jobs
+        self.transform_time_target = transform_time_target
         self.model_kwargs = model_kwargs
         self.backend = "xgboost"
         self.model = self._build_model()
@@ -221,12 +284,20 @@ class BaselineXGBoost:
 
     def fit(self, X, y):
         """训练多目标回归模型。"""
-        self.model.fit(X, y)
+        y_array = transform_targets_for_fit(
+            y,
+            transform_time_target=getattr(self, "transform_time_target", False),
+        )
+        self.model.fit(X, y_array)
         return self
 
     def predict(self, X):
         """预测最大余震震级和发生时间。"""
-        return self.model.predict(X)
+        raw_preds = self.model.predict(X)
+        return inverse_transform_model_predictions(
+            raw_preds,
+            transform_time_target=getattr(self, "transform_time_target", False),
+        )
 
 
 def build_model(model_name: str, **kwargs):

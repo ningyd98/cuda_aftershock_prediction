@@ -17,6 +17,7 @@ from src.features import (
     _load_gcmt_catalog,
     calculate_bath_law_features,
     calculate_geological_features,
+    calculate_productivity_index,
     calculate_spatial_anisotropy,
     calculate_temporal_binned_features,
     estimate_etas_parameters,
@@ -38,6 +39,27 @@ def resolve_project_path(path_value: str | Path) -> Path:
     """将配置中的相对路径解析为项目根目录下的绝对路径。"""
     path = Path(path_value)
     return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def ensure_gcmt_catalog(gcmt_path: Path, gcmt_cfg: dict) -> None:
+    """GCMT 启用但本地目录缺失时，自动下载官方 NDK 目录并解析为 CSV。"""
+    if gcmt_path.exists():
+        return
+    if not bool(gcmt_cfg.get("auto_download", True)):
+        return
+
+    print(f"GCMT 目录不存在，开始自动下载: {gcmt_path}")
+    try:
+        from scripts.download_gcmt import download_gcmt_catalog
+
+        download_gcmt_catalog(
+            start_year=int(gcmt_cfg.get("start_year", 1976)),
+            end_year=int(gcmt_cfg.get("end_year", 2024)),
+            output_dir=gcmt_path.parent,
+            request_sleep=float(gcmt_cfg.get("request_sleep", 0.2)),
+        )
+    except Exception as exc:
+        print(f"⚠ GCMT 自动下载失败: {exc}")
 
 
 def normalize_event_catalog(raw_df: pd.DataFrame) -> pd.DataFrame:
@@ -121,6 +143,10 @@ def build_one_sequence_features(
     )
 
     gr_features = estimate_gr_b_value(early_events, **gr_kwargs)
+    productivity_features = calculate_productivity_index(
+        mainshock_mag=sequence_row.mainshock_mag,
+        gr_features=gr_features,
+    )
     omori_features = fit_omori_utsu(
         early_events,
         mainshock_time=sequence_row.mainshock_time,
@@ -167,6 +193,7 @@ def build_one_sequence_features(
         "advanced_early_event_count": int(len(early_events)),
         **bath_features,
         **gr_features,
+        **productivity_features,
         **omori_features,
         **anisotropy_features,
         **temporal_features,
@@ -278,10 +305,12 @@ def main() -> None:
 
     # ---- GCMT 震源机制解匹配 ----
     gcmt_path = cfg["paths"].get("gcmt_catalog_csv")
-    gcmt_enabled = bool(cfg.get("phase1", {}).get("gcmt", {}).get("enabled", True))
+    gcmt_cfg = cfg.get("phase1", {}).get("gcmt", {})
+    gcmt_enabled = bool(gcmt_cfg.get("enabled", True))
     focal_features: list[dict] = []
     if gcmt_enabled and gcmt_path:
         gcmt_path = resolve_project_path(gcmt_path)
+        ensure_gcmt_catalog(gcmt_path, gcmt_cfg)
         gcmt_df = _load_gcmt_catalog(gcmt_path)
         if gcmt_df is not None and not gcmt_df.empty:
             for row in tqdm(rows, desc="匹配 GCMT 震源机制"):
@@ -290,6 +319,9 @@ def main() -> None:
                     mainshock_lat=row.mainshock_lat,
                     mainshock_lon=row.mainshock_lon,
                     gcmt_df=gcmt_df,
+                    time_window_days=float(gcmt_cfg.get("time_window_days", 1.0)),
+                    spatial_radius_km=float(gcmt_cfg.get("spatial_radius_km", 200.0)),
+                    earth_radius_km=float(phase1_cfg.get("earth_radius_km", 6371.0)),
                 )
                 fm["mainshock_id"] = row.mainshock_id
                 focal_features.append(fm)

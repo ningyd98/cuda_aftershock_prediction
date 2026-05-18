@@ -13,14 +13,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
 from src.features import (
+    _load_gcmt_catalog,
     calculate_bath_law_features,
     calculate_geological_features,
+    calculate_productivity_index,
     calculate_spatial_anisotropy,
     calculate_temporal_binned_features,
     estimate_etas_parameters,
     estimate_gr_b_value,
     fit_omori_utsu,
     load_plate_boundaries,
+    match_focal_mechanism,
 )
 from src.utils import haversine_km, seismic_moment_from_mw
 
@@ -119,6 +122,7 @@ def extract_early_events(
 def build_single_sequence_features(
     event_df: pd.DataFrame,
     plate_boundaries_path: Path,
+    gcmt_catalog_path: Path | None = None,
     obs_days: float = 3.0,
     spatial_radius_km: float = 100.0,
     earth_radius_km: float = 6371.0,
@@ -161,7 +165,14 @@ def build_single_sequence_features(
             early_max_mag=early_max_mag,
         )
     )
-    base_features.update(estimate_gr_b_value(early_events))
+    gr_features = estimate_gr_b_value(early_events)
+    base_features.update(gr_features)
+    base_features.update(
+        calculate_productivity_index(
+            mainshock_mag=float(mainshock["mag"]),
+            gr_features=gr_features,
+        )
+    )
     base_features.update(
         fit_omori_utsu(
             early_events,
@@ -192,6 +203,21 @@ def build_single_sequence_features(
     )
 
     feature_df = pd.DataFrame([base_features])
+    if gcmt_catalog_path is not None and gcmt_catalog_path.exists():
+        gcmt_df = _load_gcmt_catalog(gcmt_catalog_path)
+        if gcmt_df is not None and not gcmt_df.empty:
+            focal_features = match_focal_mechanism(
+                mainshock_time=mainshock["time"],
+                mainshock_lat=float(mainshock["latitude"]),
+                mainshock_lon=float(mainshock["longitude"]),
+                gcmt_df=gcmt_df,
+                earth_radius_km=earth_radius_km,
+            )
+            feature_df = pd.concat(
+                [feature_df, pd.DataFrame([focal_features])],
+                axis=1,
+            )
+
     boundaries_gdf = load_plate_boundaries(plate_boundaries_path)
     geology_df = calculate_geological_features(feature_df, boundaries_gdf)
     feature_df = feature_df.merge(geology_df, on="mainshock_id", how="left")
@@ -456,6 +482,12 @@ def parse_args() -> argparse.Namespace:
         default=PROJECT_ROOT / "data" / "raw" / "PB2002_boundaries.json",
         help="PB2002 板块边界 GeoJSON",
     )
+    parser.add_argument(
+        "--gcmt-catalog",
+        type=Path,
+        default=PROJECT_ROOT / "data" / "raw" / "GlobalCMT_1976-2024.csv",
+        help="Global CMT 震源机制解 CSV；不存在时推理会自动跳过这些特征",
+    )
     parser.add_argument("--obs-days", type=float, default=3.0)
     parser.add_argument("--spatial-radius-km", type=float, default=100.0)
     parser.add_argument("--earth-radius-km", type=float, default=6371.0)
@@ -489,11 +521,13 @@ def main() -> None:
         else model_dir / "ensemble_weights.json"
     )
     plate_boundaries_path = resolve_project_path(args.plate_boundaries)
+    gcmt_catalog_path = resolve_project_path(args.gcmt_catalog)
 
     event_df = normalize_event_table(pd.read_csv(input_path))
     feature_df, early_events = build_single_sequence_features(
         event_df,
         plate_boundaries_path=plate_boundaries_path,
+        gcmt_catalog_path=gcmt_catalog_path,
         obs_days=args.obs_days,
         spatial_radius_km=args.spatial_radius_km,
         earth_radius_km=args.earth_radius_km,

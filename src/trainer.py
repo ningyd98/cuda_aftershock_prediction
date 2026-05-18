@@ -5,9 +5,12 @@ from collections.abc import Callable, Sequence
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import TimeSeriesSplit
+from sklearn.preprocessing import RobustScaler, StandardScaler
 
 from src.evaluator import calculate_metrics
 from src.models import BaselineLGBM
+
+TIME_TARGET_INDEX = 1
 
 
 def _default_model_factory():
@@ -20,6 +23,66 @@ def _format_time(value) -> str:
     return pd.Timestamp(value).strftime("%Y-%m-%d")
 
 
+def transform_targets_for_training(y: pd.DataFrame | np.ndarray) -> pd.DataFrame | np.ndarray:
+    """震级保持原尺度，仅对时间目标做 log1p 长尾压缩。"""
+    if isinstance(y, pd.DataFrame):
+        transformed = y.copy()
+        time_col = transformed.columns[TIME_TARGET_INDEX]
+        transformed[time_col] = np.log1p(
+            pd.to_numeric(transformed[time_col], errors="coerce").clip(lower=0.0)
+        )
+        return transformed
+
+    transformed = np.asarray(y, dtype=float).copy()
+    transformed[:, TIME_TARGET_INDEX] = np.log1p(
+        np.clip(transformed[:, TIME_TARGET_INDEX], a_min=0.0, a_max=None)
+    )
+    return transformed
+
+
+def inverse_transform_predictions(preds: np.ndarray) -> np.ndarray:
+    """将模型输出从训练尺度还原到真实物理尺度。"""
+    restored = np.asarray(preds, dtype=float).copy()
+    restored[:, 0] = np.clip(restored[:, 0], a_min=0.0, a_max=None)
+    restored[:, TIME_TARGET_INDEX] = np.expm1(
+        np.clip(restored[:, TIME_TARGET_INDEX], a_min=-50.0, a_max=50.0)
+    )
+    restored[:, TIME_TARGET_INDEX] = np.clip(
+        restored[:, TIME_TARGET_INDEX],
+        a_min=0.0,
+        a_max=None,
+    )
+    return restored
+
+
+def build_fold_scaler(scaler_type: str | None):
+    """为需要归一化的模型创建 fold 内 scaler；树模型默认不使用。"""
+    if scaler_type is None:
+        return None
+
+    normalized = scaler_type.lower()
+    if normalized == "standard":
+        return StandardScaler()
+    if normalized == "robust":
+        return RobustScaler()
+    raise ValueError("scaler_type 必须为 None、'standard' 或 'robust'。")
+
+
+def _disable_model_internal_time_transform(model: object) -> None:
+    """
+    trainer.py 已在外部对时间目标做 log1p，因此关闭内置二次转换。
+
+    对 LightGBM 自定义目标，仍保持 objective 在 log 空间解释 y_true/y_pred。
+    """
+    if hasattr(model, "transform_time_target"):
+        setattr(model, "transform_time_target", False)
+
+    time_model = getattr(model, "time_model", None)
+    objective = getattr(time_model, "objective", None)
+    if hasattr(objective, "log_space"):
+        setattr(objective, "log_space", True)
+
+
 def time_series_cv_train(
     df: pd.DataFrame,
     feature_cols: Sequence[str],
@@ -28,6 +91,7 @@ def time_series_cv_train(
     model_factory: Callable[[], object] | None = None,
     time_col: str = "mainshock_time",
     late_weight: float = 2.0,
+    scaler_type: str | None = None,
 ) -> tuple[pd.DataFrame, dict]:
     """
     按主震时间排序后进行滚动时间序列交叉验证。
@@ -63,15 +127,34 @@ def time_series_cv_train(
     y = train_df[list(target_cols)]
 
     for fold_idx, (train_idx, valid_idx) in enumerate(splitter.split(X), start=1):
-        X_train = X.iloc[train_idx]
-        y_train = y.iloc[train_idx]
-        X_valid = X.iloc[valid_idx]
+        X_train_raw = X.iloc[train_idx]
+        X_valid_raw = X.iloc[valid_idx]
+        y_train_raw = y.iloc[train_idx]
         y_valid = y.iloc[valid_idx]
 
+        scaler = build_fold_scaler(scaler_type)
+        if scaler is None:
+            X_train = X_train_raw
+            X_valid = X_valid_raw
+        else:
+            X_train = pd.DataFrame(
+                scaler.fit_transform(X_train_raw),
+                columns=list(feature_cols),
+                index=X_train_raw.index,
+            )
+            X_valid = pd.DataFrame(
+                scaler.transform(X_valid_raw),
+                columns=list(feature_cols),
+                index=X_valid_raw.index,
+            )
+
+        y_train = transform_targets_for_training(y_train_raw)
+
         model = factory()
+        _disable_model_internal_time_transform(model)
         model.fit(X_train, y_train)
-        preds = np.asarray(model.predict(X_valid), dtype=float)
-        preds = np.clip(preds, a_min=0.0, a_max=None)
+        preds_model_scale = np.asarray(model.predict(X_valid), dtype=float)
+        preds = inverse_transform_predictions(preds_model_scale)
 
         metrics = calculate_metrics(
             y_true_mag=y_valid.iloc[:, 0].to_numpy(),
@@ -90,6 +173,7 @@ def time_series_cv_train(
             {
                 "fold": fold_idx,
                 "backend": getattr(model, "backend", model.__class__.__name__),
+                "scaler_type": scaler_type or "none",
                 "train_size": int(len(train_idx)),
                 "valid_size": int(len(valid_idx)),
                 "train_start": _format_time(train_df.loc[train_idx[0], time_col]),
@@ -108,6 +192,7 @@ def time_series_cv_train(
         not in {
             "fold",
             "backend",
+            "scaler_type",
             "train_size",
             "valid_size",
             "train_start",

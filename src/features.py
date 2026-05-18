@@ -144,6 +144,19 @@ def estimate_gr_b_value(
     }
 
 
+def calculate_productivity_index(
+    mainshock_mag: float,
+    gr_features: dict,
+) -> dict:
+    """计算地震生产率指数: a - b * M_main。"""
+    a_value = float(gr_features.get("gr_a_value", np.nan))
+    b_value = float(gr_features.get("gr_b_value", np.nan))
+    main_mag = float(mainshock_mag)
+    if not np.isfinite([a_value, b_value, main_mag]).all():
+        return {"productivity_index": np.nan}
+    return {"productivity_index": float(a_value - b_value * main_mag)}
+
+
 def fit_omori_utsu(
     events: pd.DataFrame,
     mainshock_time,
@@ -704,7 +717,12 @@ def _load_gcmt_catalog(gcmt_path: Path) -> pd.DataFrame | None:
         return None
     try:
         gcmt = pd.read_csv(gcmt_path)
-        gcmt["time"] = pd.to_datetime(gcmt["time"], utc=True, errors="coerce")
+        gcmt["time"] = pd.to_datetime(
+            gcmt["time"],
+            utc=True,
+            errors="coerce",
+            format="mixed",
+        )
         return gcmt.dropna(subset=["time", "latitude", "longitude"])
     except Exception:
         return None

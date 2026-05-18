@@ -43,6 +43,10 @@ phase1:
     one_hot_types: [SUB, OTF, OSR, UNK]
   gcmt:
     enabled: true
+    auto_download: true
+    start_year: 1976
+    end_year: 2024
+    request_sleep: 0.2
     time_window_days: 1.0
     spatial_radius_km: 200.0
 

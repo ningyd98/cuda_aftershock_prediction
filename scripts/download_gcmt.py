@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import calendar
 import gzip
 import re
 import time
@@ -13,7 +14,9 @@ import requests
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-GCMT_BASE_URL = "https://www.globalcmt.org/CMTfiles/NCEQ"
+GCMT_CATALOG_BASE_URL = "https://www.ldeo.columbia.edu/~gcmt/projects/CMT/catalog"
+GCMT_LEGACY_ARCHIVE_URL = f"{GCMT_CATALOG_BASE_URL}/jan76_dec20.ndk.gz"
+GCMT_MONTHLY_BASE_URL = f"{GCMT_CATALOG_BASE_URL}/NEW_MONTHLY"
 
 # ———— NDK 格式解析 ————
 # Global CMT 使用 NDK (NCEQ Deci-Kilometer) 格式，每个事件占 4-5 行。
@@ -31,82 +34,144 @@ def _parse_float(value: str) -> float:
         return np.nan
 
 
-def parse_gcmt_ndk(text: str) -> pd.DataFrame:
-    """解析 Global CMT NDK 格式文本为 DataFrame。"""
-    records: list[dict] = []
-    # NDK 每 5 行为一个事件（第5行可能为空或为注释）
-    lines = text.strip().split("\n")
-    # 过滤注释行
-    data_lines = [ln for ln in lines if not ln.strip().startswith("#")]
+def _parse_ndk_header_time(header: list[str]) -> tuple[pd.Timestamp, float, float, float]:
+    """解析 NDK 第一行中的时间、纬度、经度和深度。"""
+    if len(header) < 7:
+        return pd.NaT, np.nan, np.nan, np.nan
 
-    i = 0
-    while i < len(data_lines) - 3:
-        # 第1行: 头信息 (PDE 标识, 时间, 位置, 震级等)
-        header = data_lines[i].split()
-        if len(header) < 10:
-            i += 1
-            continue
-
-        try:
-            year = int(header[1])
-            month = int(header[2])
-            day = int(header[3])
-            hour = int(header[4])
-            minute = int(header[5])
-            second = float(header[6])
+    try:
+        if "/" in header[1]:
+            # 标准 Global CMT NDK: PDEW 2024/01/01 07:10:09.5 ...
+            date_token = header[1]
+            time_token = header[2]
+            lat = float(header[3])
+            lon = float(header[4])
+            depth = float(header[5])
+        else:
+            # 兼容旧解析逻辑: PDEW 2024 1 1 07 10 09.5 ...
+            date_token = f"{int(header[1]):04d}/{int(header[2]):02d}/{int(header[3]):02d}"
+            time_token = f"{int(header[4]):02d}:{int(header[5]):02d}:{float(header[6]):04.1f}"
             lat = float(header[7])
             lon = float(header[8])
             depth = float(header[9])
-        except (ValueError, IndexError):
+    except (ValueError, IndexError):
+        return pd.NaT, np.nan, np.nan, np.nan
+
+    event_time = pd.to_datetime(
+        f"{date_token} {time_token}",
+        utc=True,
+        errors="coerce",
+        format="mixed",
+    )
+    return event_time, lat, lon, depth
+
+
+def _parse_tensor_line(line: str) -> tuple[float, float, float, float, float, float, int]:
+    """解析 NDK 第 4 行中的矩张量分量。"""
+    parts = line.split()
+    if len(parts) < 12:
+        return (np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, 0)
+
+    try:
+        exponent = int(float(parts[0]))
+    except ValueError:
+        exponent = 0
+
+    scale = 10.0 ** exponent
+    values = []
+    for idx in (1, 3, 5, 7, 9, 11):
+        values.append(_parse_float(parts[idx]) * scale if idx < len(parts) else np.nan)
+    return (*values, exponent)
+
+
+def _parse_principal_axis_line(line: str, exponent: int) -> dict:
+    """解析 NDK 第 5 行中的 P/T/B 轴、标量矩和节点面。"""
+    parts = line.split()
+    result = {
+        "mw": np.nan,
+        "scalar_moment": np.nan,
+        "plunge_T": np.nan,
+        "trend_T": np.nan,
+        "plunge_B": np.nan,
+        "trend_B": np.nan,
+        "plunge_P": np.nan,
+        "trend_P": np.nan,
+        "strike1": np.nan,
+        "dip1": np.nan,
+        "rake1": np.nan,
+        "strike2": np.nan,
+        "dip2": np.nan,
+        "rake2": np.nan,
+        "f_clvd": np.nan,
+    }
+    if len(parts) < 17:
+        return result
+
+    eig_t = _parse_float(parts[1])
+    eig_b = _parse_float(parts[4])
+    eig_p = _parse_float(parts[7])
+    m0_mantissa = _parse_float(parts[10])
+    m0_dyne_cm = m0_mantissa * (10.0 ** exponent) if np.isfinite(m0_mantissa) else np.nan
+
+    if np.isfinite(m0_dyne_cm) and m0_dyne_cm > 0:
+        result["scalar_moment"] = float(m0_dyne_cm)
+        # Global CMT 的标量矩单位为 dyne-cm: Mw = 2/3 * (log10(M0) - 16.1)
+        result["mw"] = float((2.0 / 3.0) * (np.log10(m0_dyne_cm) - 16.1))
+
+    result.update(
+        {
+            "plunge_T": _parse_float(parts[2]),
+            "trend_T": _parse_float(parts[3]),
+            "plunge_B": _parse_float(parts[5]),
+            "trend_B": _parse_float(parts[6]),
+            "plunge_P": _parse_float(parts[8]),
+            "trend_P": _parse_float(parts[9]),
+            "strike1": _parse_float(parts[11]),
+            "dip1": _parse_float(parts[12]),
+            "rake1": _parse_float(parts[13]),
+            "strike2": _parse_float(parts[14]),
+            "dip2": _parse_float(parts[15]),
+            "rake2": _parse_float(parts[16]),
+        }
+    )
+
+    if np.isfinite(eig_t) and abs(eig_t) > 1e-30 and np.isfinite(eig_b):
+        result["f_clvd"] = float(-eig_b / max(abs(eig_t), 1e-30))
+
+    return result
+
+
+def parse_gcmt_ndk(text: str) -> pd.DataFrame:
+    """解析 Global CMT NDK 格式文本为 DataFrame。"""
+    records: list[dict] = []
+    lines = text.strip().split("\n")
+    data_lines = [ln.rstrip("\n") for ln in lines if ln.strip() and not ln.strip().startswith("#")]
+
+    i = 0
+    while i <= len(data_lines) - 5:
+        header = data_lines[i].split()
+        if len(header) < 6 or not re.search(r"\d{4}/\d{2}/\d{2}|\d{4}/\d{1,2}/\d{1,2}", data_lines[i]):
             i += 1
             continue
 
-        # 第2行: 事件名 + 矩张量分量 (Mrr, Mtt, Mpp, Mrt, Mrp, Mtp)
-        if i + 3 >= len(data_lines):
-            break
+        event_time, lat, lon, depth = _parse_ndk_header_time(header)
+        if pd.isna(event_time) or not np.isfinite([lat, lon, depth]).all():
+            i += 1
+            continue
+
         event_line = data_lines[i + 1].strip()
-        # 事件名通常在行首
         event_name_parts = event_line.split()
         event_name = event_name_parts[0] if event_name_parts else ""
-        # 矩张量分量在行尾（最后12列通常是6个指数+6个尾数）
-        # NDK 格式: BXXXXXXA BXXXXXXA ... 每个12字符含一位指数
-
-        # 第3行: 更多事件信息 + 指数
-        # 第4行: 矩震级 + 标量矩 + 半持续时间 + 时间延迟 + 震源时间函数类型
-
-        # 实际上 NDK 格式非常复杂，这里采用简化解析：
-        # 用正则从2-4行提取 Mrr, Mtt, Mpp, Mrt, Mrp, Mtp
-        tensor_text = " ".join(data_lines[i + 1 : i + 4])
-        # 匹配形如 -1.230e+19 的科学记数法
-        tensor_values = re.findall(r"(-?\d+\.\d+e[+-]\d+)", tensor_text)
-        mrr = mtt = mpp = mrt = mrp = mtp = np.nan
-        if len(tensor_values) >= 6:
-            mrr = float(tensor_values[0])
-            mtt = float(tensor_values[1])
-            mpp = float(tensor_values[2])
-            mrt = float(tensor_values[3])
-            mrp = float(tensor_values[4])
-            mtp = float(tensor_values[5])
-
-        # 第4行: 版本码 + Mw + 标量矩
-        line4 = data_lines[i + 3].split()
-        mw = _parse_float(line4[1]) if len(line4) > 1 else np.nan
-        scalar_moment = _parse_float(line4[2]) if len(line4) > 2 else np.nan
-
-        # 构建时间
-        try:
-            time_str = f"{year:04d}-{month:02d}-{day:02d} {hour:02d}:{minute:02d}:{int(second):02d}"
-            event_time = pd.to_datetime(time_str, utc=True)
-        except Exception:
-            event_time = pd.NaT
+        mrr, mtt, mpp, mrt, mrp, mtp, exponent = _parse_tensor_line(data_lines[i + 3])
+        axis_features = _parse_principal_axis_line(data_lines[i + 4], exponent)
 
         records.append({
             "time": event_time,
             "latitude": lat,
             "longitude": lon,
             "depth": depth,
-            "mw": mw,
-            "scalar_moment": scalar_moment,
+            "mw": axis_features["mw"],
+            "scalar_moment": axis_features["scalar_moment"],
             "mrr": mrr,
             "mtt": mtt,
             "mpp": mpp,
@@ -114,9 +179,22 @@ def parse_gcmt_ndk(text: str) -> pd.DataFrame:
             "mrp": mrp,
             "mtp": mtp,
             "event_name": event_name,
+            "strike1": axis_features["strike1"],
+            "dip1": axis_features["dip1"],
+            "rake1": axis_features["rake1"],
+            "strike2": axis_features["strike2"],
+            "dip2": axis_features["dip2"],
+            "rake2": axis_features["rake2"],
+            "plunge_P": axis_features["plunge_P"],
+            "trend_P": axis_features["trend_P"],
+            "plunge_T": axis_features["plunge_T"],
+            "trend_T": axis_features["trend_T"],
+            "plunge_B": axis_features["plunge_B"],
+            "trend_B": axis_features["trend_B"],
+            "f_clvd": axis_features["f_clvd"],
         })
 
-        i += 5  # 跳过已解析的 5 行
+        i += 5
 
     df = pd.DataFrame(records)
     if not df.empty:
@@ -133,6 +211,22 @@ def compute_focal_mechanism_features(df: pd.DataFrame) -> pd.DataFrame:
           plunge_P, trend_P, plunge_T, trend_T, plunge_B, trend_B,
           f_clvd (CLVD 分量比例)
     """
+    parsed_cols = {
+        "strike1", "dip1", "rake1", "strike2", "dip2", "rake2",
+        "plunge_P", "trend_P", "plunge_T", "trend_T", "plunge_B", "trend_B",
+        "f_clvd",
+    }
+    if parsed_cols.issubset(df.columns) and df["strike1"].notna().any():
+        out = df.copy()
+        out["fault_type"] = out["rake1"].map(_classify_fault_type).fillna("UNK")
+        keep_cols = [
+            "time", "latitude", "longitude", "depth", "mw", "event_name",
+            "strike1", "dip1", "rake1", "strike2", "dip2", "rake2",
+            "fault_type", "plunge_P", "trend_P", "plunge_T", "trend_T",
+            "plunge_B", "trend_B", "f_clvd",
+        ]
+        return out[keep_cols]
+
     from numpy.linalg import eigh
 
     results: list[dict] = []
@@ -215,7 +309,7 @@ def compute_focal_mechanism_features(df: pd.DataFrame) -> pd.DataFrame:
 
         results.append({
             "strike1": strike1, "dip1": dip1, "rake1": rake1,
-            "strike2": strike2, "dip2": dip2, "rake2": dip2,
+            "strike2": strike2, "dip2": dip2, "rake2": rake2,
             "fault_type": fault_type,
             "plunge_P": plunge_P, "trend_P": trend_P,
             "plunge_T": plunge_T, "trend_T": trend_T,
@@ -330,32 +424,58 @@ def download_gcmt_catalog(
 
     all_dfs: list[pd.DataFrame] = []
 
-    for year in range(start_year, end_year + 1):
-        # 月文件
-        for month in range(1, 13):
-            url = f"{GCMT_BASE_URL}/{year}{month:02d}.ndk"
-            print(f"  [{year}-{month:02d}] 尝试下载 ...", end=" ", flush=True)
+    def _response_to_text(resp: requests.Response, url: str) -> str:
+        if url.endswith(".gz"):
+            with gzip.GzipFile(fileobj=BytesIO(resp.content)) as file:
+                return file.read().decode("utf-8", errors="replace")
+        return resp.text
+
+    def _download_text(urls: list[str]) -> tuple[str, str] | None:
+        for url in urls:
             try:
-                resp = requests.get(url, timeout=30)
+                resp = requests.get(url, timeout=60)
                 if resp.status_code == 404:
-                    # 尝试 gz 压缩格式
-                    url_gz = f"{url}.gz"
-                    resp = requests.get(url_gz, timeout=30)
-                    if resp.status_code == 404:
-                        print("无数据")
-                        time.sleep(request_sleep)
-                        continue
-                    resp.raise_for_status()
-                    # 解压
-                    with gzip.GzipFile(fileobj=BytesIO(resp.content)) as f:
-                        text = f.read().decode("utf-8", errors="replace")
-                else:
-                    resp.raise_for_status()
-                    text = resp.text
-            except requests.RequestException as exc:
-                print(f"失败: {exc}")
+                    continue
+                resp.raise_for_status()
+                return _response_to_text(resp, url), url
+            except (requests.RequestException, OSError, gzip.BadGzipFile):
+                continue
+        return None
+
+    if start_year <= 2020:
+        end_filter = min(end_year, 2020)
+        print(f"  [1976-2020] 下载历史归档 ...", end=" ", flush=True)
+        downloaded = _download_text([GCMT_LEGACY_ARCHIVE_URL])
+        if downloaded is None:
+            print("失败")
+        else:
+            text, url = downloaded
+            df_archive = parse_gcmt_ndk(text)
+            if not df_archive.empty:
+                times = pd.to_datetime(df_archive["time"], utc=True, errors="coerce")
+                df_archive = df_archive.loc[
+                    (times.dt.year >= start_year) & (times.dt.year <= end_filter)
+                ].copy()
+                if not df_archive.empty:
+                    all_dfs.append(df_archive)
+            print(f"✓ {len(df_archive) if 'df_archive' in locals() else 0} 条 ({url})")
+
+    monthly_start_year = max(start_year, 2021)
+    for year in range(monthly_start_year, end_year + 1):
+        for month in range(1, 13):
+            month_name = calendar.month_abbr[month].lower()
+            yy = str(year)[-2:]
+            urls = [
+                f"{GCMT_MONTHLY_BASE_URL}/{year}/{month_name}{yy}.ndk",
+                f"{GCMT_MONTHLY_BASE_URL}/{year}/{month_name}{yy}.ndk.gz",
+            ]
+            print(f"  [{year}-{month:02d}] 尝试下载 ...", end=" ", flush=True)
+            downloaded = _download_text(urls)
+            if downloaded is None:
+                print("无数据")
                 time.sleep(request_sleep)
                 continue
+            text, source_url = downloaded
 
             try:
                 df_month = parse_gcmt_ndk(text)

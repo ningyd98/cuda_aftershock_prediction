@@ -10,7 +10,8 @@
 │  data/raw/                                                   │
 │  ├── USGS_Mw6.0_Depth70_1970-2023.csv   ← 主震目录 (Mw≥6.0) │
 │  ├── USGS_Mw4.0_Depth70_1970-2023.csv   ← 完整目录 (特征用)  │
-│  └── PB2002_boundaries.json             ← 板块边界 GeoJSON   │
+│  ├── PB2002_boundaries.json             ← 板块边界 GeoJSON   │
+│  └── GlobalCMT_1976-2024.csv            ← 震源机制解目录     │
 ├─────────────────────────────────────────────────────────────┤
 │                      特征层 (Feature Layer)                   │
 │  src/features.py                                              │
@@ -77,6 +78,8 @@ python main.py build-features
 # 快速冒烟测试（前 50 条）
 python main.py build-features --limit 50 --output data/processed/advanced_features_smoke.csv
 ```
+
+如果 `configs/default.yaml` 中 `phase1.gcmt.enabled=true` 且本地缺少 `data/raw/GlobalCMT_1976-2024.csv`，特征脚本会自动下载 Global CMT 官方 NDK 目录并生成本地 CSV。
 
 ### 4. 训练模型
 
