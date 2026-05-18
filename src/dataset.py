@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections.abc import Sequence
 
 import numpy as np
@@ -35,12 +35,13 @@ class SequenceBuildConfig:
 class DatasetPreprocessors:
     """深度学习输入预处理器，可用 joblib 序列化保存。"""
 
-    seq_scaler: RobustScaler | StandardScaler
-    global_scaler: RobustScaler | StandardScaler
-    global_fill_values: dict[str, float]
-    global_indicator_cols: list[str]
+    seq_scaler: RobustScaler | StandardScaler | None = None
+    global_scaler: RobustScaler | StandardScaler | None = None
+    global_fill_values: dict[str, float] = field(default_factory=dict)
+    global_indicator_cols: list[str] = field(default_factory=list)
     scaler_type: str = "robust"
     add_missing_indicators: bool = True
+    time_target_transform: str = "log1p"
 
 
 def _build_scaler(scaler_type: str):
@@ -51,6 +52,31 @@ def _build_scaler(scaler_type: str):
     if normalized == "standard":
         return StandardScaler()
     raise ValueError("scaler_type 必须为 'robust' 或 'standard'。")
+
+
+def _fit_global_fill_values_from_frame(
+    numeric_df: pd.DataFrame,
+    global_feature_cols: Sequence[str],
+    add_missing_indicators: bool,
+) -> tuple[dict[str, float], list[str], pd.DataFrame]:
+    """仅基于训练集确定全局特征填充值和缺失指示列。"""
+    fill_values: dict[str, float] = {}
+    indicator_cols: list[str] = []
+
+    for col in global_feature_cols:
+        series = numeric_df[col]
+        if add_missing_indicators and series.isna().any():
+            indicator_cols.append(col)
+
+        if col in DOMAIN_PRIOR_FILL_VALUES:
+            fill_values[col] = float(DOMAIN_PRIOR_FILL_VALUES[col])
+            continue
+
+        median_value = series.median(skipna=True)
+        fill_values[col] = float(median_value) if np.isfinite(median_value) else 0.0
+
+    filled_global = numeric_df.fillna(fill_values).fillna(0.0)
+    return fill_values, indicator_cols, filled_global
 
 
 class EarthquakeSequenceDataset(Dataset):
@@ -75,6 +101,11 @@ class EarthquakeSequenceDataset(Dataset):
         fit_preprocessors: bool = True,
         scaler_type: str = "robust",
         add_missing_indicators: bool = True,
+        global_scaler: RobustScaler | StandardScaler | None = None,
+        seq_scaler: RobustScaler | StandardScaler | None = None,
+        global_fill_values: dict[str, float] | None = None,
+        global_indicator_cols: Sequence[str] | None = None,
+        target_time_log_transform: bool = True,
     ) -> None:
         self.sequence_df = sequence_df.copy().reset_index(drop=True)
         self.event_catalog_df = self._normalize_event_catalog(event_catalog_df)
@@ -85,6 +116,7 @@ class EarthquakeSequenceDataset(Dataset):
         self.fit_preprocessors = fit_preprocessors
         self.scaler_type = scaler_type
         self.add_missing_indicators = add_missing_indicators
+        self.target_time_log_transform = target_time_log_transform
 
         self.sequence_df["mainshock_time"] = pd.to_datetime(
             self.sequence_df["mainshock_time"],
@@ -103,7 +135,13 @@ class EarthquakeSequenceDataset(Dataset):
             "mag",
         ]
         self._validate_columns()
-        self._initialize_preprocessors()
+        self._configure_preprocessors(
+            preprocessors=preprocessors,
+            global_scaler=global_scaler,
+            seq_scaler=seq_scaler,
+            global_fill_values=global_fill_values,
+            global_indicator_cols=global_indicator_cols,
+        )
         self.global_x_matrix = self._build_global_matrix()
         self.global_feature_dim = int(self.global_x_matrix.shape[1])
 
@@ -113,13 +151,21 @@ class EarthquakeSequenceDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         row = self.sequence_df.iloc[idx]
         early_events = self._extract_early_events(row)
-        seq_x = self._build_event_tensor(early_events, row)
-        seq_x = self._transform_event_tensor(seq_x)
+        raw_seq_x = self._build_event_tensor(early_events, row)
+        seq_x = self._transform_event_tensor(raw_seq_x)
+        graph_time_days = raw_seq_x[:, 0] if len(raw_seq_x) else np.zeros(0, dtype=np.float32)
+        graph_coords_km = (
+            raw_seq_x[:, 2:4]
+            if len(raw_seq_x)
+            else np.zeros((0, 2), dtype=np.float32)
+        )
         global_x = self.global_x_matrix[idx]
-        y = row[self.target_cols].astype(float).to_numpy(dtype=np.float32)
+        y = self._build_target_array(row)
 
         return {
             "seq_x": torch.tensor(seq_x, dtype=torch.float32),
+            "graph_time_days": torch.tensor(graph_time_days, dtype=torch.float32),
+            "graph_coords_km": torch.tensor(graph_coords_km, dtype=torch.float32),
             "global_x": torch.tensor(global_x, dtype=torch.float32),
             "y": torch.tensor(y, dtype=torch.float32),
             "metadata": {
@@ -144,58 +190,33 @@ class EarthquakeSequenceDataset(Dataset):
         if missing_sequence_cols:
             raise ValueError(f"主震样本表缺少必要字段: {missing_sequence_cols}")
 
-    def _initialize_preprocessors(self) -> None:
-        """拟合或复用序列和全局特征预处理器。"""
-        if self.preprocessors is not None and not self.fit_preprocessors:
+    def _configure_preprocessors(
+        self,
+        preprocessors: DatasetPreprocessors | None,
+        global_scaler: RobustScaler | StandardScaler | None,
+        seq_scaler: RobustScaler | StandardScaler | None,
+        global_fill_values: dict[str, float] | None,
+        global_indicator_cols: Sequence[str] | None,
+    ) -> None:
+        """
+        注册外部拟合好的预处理器。
+
+        注意：这里绝不 fit scaler。训练脚本必须先按时间切分，再仅用训练集
+        调用 fit_dataset_preprocessors，随后把返回对象传入 Dataset。
+        """
+        if preprocessors is not None:
+            self.preprocessors = preprocessors
             return
-
-        seq_scaler = _build_scaler(self.scaler_type)
-        seq_rows = []
-        for _, row in self.sequence_df.iterrows():
-            events = self._extract_early_events(row)
-            seq = self._build_event_tensor(events, row)
-            if len(seq):
-                seq_rows.append(seq)
-        seq_fit_matrix = (
-            np.vstack(seq_rows)
-            if seq_rows
-            else np.zeros((1, len(self.event_feature_cols)), dtype=np.float32)
-        )
-        seq_scaler.fit(seq_fit_matrix)
-
-        global_fill_values, indicator_cols, filled_global = self._fit_global_fill_values()
-        global_scaler = _build_scaler(self.scaler_type)
-        global_scaler.fit(filled_global.to_numpy(dtype=float))
 
         self.preprocessors = DatasetPreprocessors(
             seq_scaler=seq_scaler,
             global_scaler=global_scaler,
-            global_fill_values=global_fill_values,
-            global_indicator_cols=indicator_cols,
+            global_fill_values=dict(global_fill_values or {}),
+            global_indicator_cols=list(global_indicator_cols or []),
             scaler_type=self.scaler_type,
             add_missing_indicators=self.add_missing_indicators,
+            time_target_transform="log1p" if self.target_time_log_transform else "none",
         )
-
-    def _fit_global_fill_values(self) -> tuple[dict[str, float], list[str], pd.DataFrame]:
-        """根据领域先验和训练集中位数确定全局特征填充值。"""
-        numeric_df = self._raw_global_dataframe()
-        fill_values: dict[str, float] = {}
-        indicator_cols: list[str] = []
-
-        for col in self.global_feature_cols:
-            series = numeric_df[col]
-            if self.add_missing_indicators and series.isna().any():
-                indicator_cols.append(col)
-
-            if col in DOMAIN_PRIOR_FILL_VALUES:
-                fill_values[col] = float(DOMAIN_PRIOR_FILL_VALUES[col])
-                continue
-
-            median_value = series.median(skipna=True)
-            fill_values[col] = float(median_value) if np.isfinite(median_value) else 0.0
-
-        filled_global = numeric_df.fillna(fill_values).fillna(0.0)
-        return fill_values, indicator_cols, filled_global
 
     def _raw_global_dataframe(self) -> pd.DataFrame:
         """抽取并数值化全局特征表，布尔值转 0/1。"""
@@ -211,14 +232,15 @@ class EarthquakeSequenceDataset(Dataset):
             raise RuntimeError("Dataset preprocessors 尚未初始化。")
 
         raw_global = self._raw_global_dataframe()
-        filled_global = (
-            raw_global
-            .fillna(self.preprocessors.global_fill_values)
-            .fillna(0.0)
-        )
-        scaled_global = self.preprocessors.global_scaler.transform(
-            filled_global.to_numpy(dtype=float)
-        )
+        fill_values = dict(DOMAIN_PRIOR_FILL_VALUES)
+        fill_values.update(self.preprocessors.global_fill_values)
+        filled_global = raw_global.fillna(fill_values).fillna(0.0)
+        global_values = filled_global.to_numpy(dtype=float)
+
+        if self.preprocessors.global_scaler is not None:
+            scaled_global = self.preprocessors.global_scaler.transform(global_values)
+        else:
+            scaled_global = global_values
 
         if self.preprocessors.add_missing_indicators and self.preprocessors.global_indicator_cols:
             indicators = raw_global[
@@ -237,7 +259,11 @@ class EarthquakeSequenceDataset(Dataset):
 
     def _transform_event_tensor(self, seq_x: np.ndarray) -> np.ndarray:
         """对真实事件序列逐维缩放；空序列保持 0 行。"""
-        if self.preprocessors is None or len(seq_x) == 0:
+        if (
+            self.preprocessors is None
+            or self.preprocessors.seq_scaler is None
+            or len(seq_x) == 0
+        ):
             return seq_x.astype(np.float32)
 
         transformed = self.preprocessors.seq_scaler.transform(seq_x.astype(float))
@@ -247,6 +273,15 @@ class EarthquakeSequenceDataset(Dataset):
             posinf=0.0,
             neginf=0.0,
         ).astype(np.float32)
+
+    def _build_target_array(self, row: pd.Series) -> np.ndarray:
+        """构造训练目标；时间目标在深度模型中使用 log1p 尺度。"""
+        y = row[self.target_cols].astype(float).to_numpy(dtype=np.float32)
+        if self.target_time_log_transform and "target_time_to_max_days" in self.target_cols:
+            time_idx = self.target_cols.index("target_time_to_max_days")
+            if np.isfinite(y[time_idx]):
+                y[time_idx] = np.log1p(max(float(y[time_idx]), 0.0))
+        return y
 
     def _normalize_event_catalog(self, df: pd.DataFrame) -> pd.DataFrame:
         """标准化事件目录，供每个主震重建早期余震序列。"""
@@ -322,6 +357,70 @@ class EarthquakeSequenceDataset(Dataset):
         return np.nan_to_num(seq, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
 
+def fit_dataset_preprocessors(
+    sequence_df: pd.DataFrame,
+    event_catalog_df: pd.DataFrame,
+    global_feature_cols: Sequence[str],
+    target_cols: Sequence[str] = ("target_max_mag", "target_time_to_max_days"),
+    config: SequenceBuildConfig | None = None,
+    scaler_type: str = "robust",
+    add_missing_indicators: bool = True,
+) -> DatasetPreprocessors:
+    """
+    在 Dataset 外部拟合深度学习预处理器，避免时序泄漏。
+
+    调用方必须先完成时间切分，并且只把训练集传入本函数。函数只使用真实
+    事件行拟合 seq_scaler，不会把 padding 行纳入统计。
+    """
+    reference_dataset = EarthquakeSequenceDataset(
+        sequence_df=sequence_df,
+        event_catalog_df=event_catalog_df,
+        global_feature_cols=global_feature_cols,
+        target_cols=target_cols,
+        config=config,
+        preprocessors=DatasetPreprocessors(
+            scaler_type=scaler_type,
+            add_missing_indicators=add_missing_indicators,
+        ),
+        fit_preprocessors=False,
+        scaler_type=scaler_type,
+        add_missing_indicators=add_missing_indicators,
+    )
+
+    seq_rows: list[np.ndarray] = []
+    for _, row in reference_dataset.sequence_df.iterrows():
+        events = reference_dataset._extract_early_events(row)
+        seq = reference_dataset._build_event_tensor(events, row)
+        if len(seq):
+            seq_rows.append(seq)
+    seq_fit_matrix = (
+        np.vstack(seq_rows)
+        if seq_rows
+        else np.zeros((1, len(reference_dataset.event_feature_cols)), dtype=np.float32)
+    )
+    seq_scaler = _build_scaler(scaler_type)
+    seq_scaler.fit(seq_fit_matrix)
+
+    raw_global = reference_dataset._raw_global_dataframe()
+    global_fill_values, indicator_cols, filled_global = _fit_global_fill_values_from_frame(
+        raw_global,
+        global_feature_cols=global_feature_cols,
+        add_missing_indicators=add_missing_indicators,
+    )
+    global_scaler = _build_scaler(scaler_type)
+    global_scaler.fit(filled_global.to_numpy(dtype=float))
+
+    return DatasetPreprocessors(
+        seq_scaler=seq_scaler,
+        global_scaler=global_scaler,
+        global_fill_values=global_fill_values,
+        global_indicator_cols=indicator_cols,
+        scaler_type=scaler_type,
+        add_missing_indicators=add_missing_indicators,
+        time_target_transform="log1p",
+    )
+
+
 def earthquake_collate_fn(batch: list[dict]) -> dict:
     """
     对不等长事件序列进行 Padding，并生成 Transformer padding mask。
@@ -334,16 +433,22 @@ def earthquake_collate_fn(batch: list[dict]) -> dict:
     max_len = max(max_len, 1)
 
     seq_x = torch.zeros(batch_size, max_len, seq_dim, dtype=torch.float32)
+    graph_time_days = torch.zeros(batch_size, max_len, dtype=torch.float32)
+    graph_coords_km = torch.zeros(batch_size, max_len, 2, dtype=torch.float32)
     seq_padding_mask = torch.ones(batch_size, max_len, dtype=torch.bool)
 
     for idx, item in enumerate(batch):
         cur_len = item["seq_x"].shape[0]
         if cur_len > 0:
             seq_x[idx, :cur_len] = item["seq_x"]
+            graph_time_days[idx, :cur_len] = item["graph_time_days"]
+            graph_coords_km[idx, :cur_len] = item["graph_coords_km"]
             seq_padding_mask[idx, :cur_len] = False
 
     return {
         "seq_x": seq_x,
+        "graph_time_days": graph_time_days,
+        "graph_coords_km": graph_coords_km,
         "seq_padding_mask": seq_padding_mask,
         "global_x": torch.stack([item["global_x"] for item in batch]),
         "y": torch.stack([item["y"] for item in batch]),

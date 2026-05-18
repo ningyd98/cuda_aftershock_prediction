@@ -48,7 +48,8 @@ phase1:
     end_year: 2024
     request_sleep: 0.2
     time_window_days: 1.0
-    spatial_radius_km: 200.0
+    time_tolerance_seconds: 60.0
+    spatial_radius_km: 50.0
 
 parallel:
   n_jobs: -1

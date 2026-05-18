@@ -728,6 +728,184 @@ def _load_gcmt_catalog(gcmt_path: Path) -> pd.DataFrame | None:
         return None
 
 
+GCMT_FEATURE_COLUMNS = [
+    "strike1", "dip1", "rake1",
+    "strike2", "dip2", "rake2",
+    "fault_type",
+    "fault_type_Thrust", "fault_type_Normal",
+    "fault_type_Strike_Slip", "fault_type_Unknown",
+    "fault_type_NF", "fault_type_SS", "fault_type_TF", "fault_type_UNK",
+    "plunge_P", "trend_P", "plunge_T", "trend_T",
+    "f_clvd",
+    "gcmt_time_diff_seconds", "gcmt_distance_km",
+    "focal_mechanism_valid",
+]
+
+
+def classify_fault_type_from_rake(rake: float) -> str:
+    """
+    根据 rake 角粗分类震源机制。
+
+    Thrust 对应逆冲/逆断层，Normal 对应正断层，Strike-Slip 对应走滑。
+    斜滑样本在三分类中按 rake 落入的主导象限归入最接近类别。
+    """
+    if not np.isfinite(rake):
+        return "Unknown"
+    rake_norm = ((float(rake) + 180.0) % 360.0) - 180.0
+    if 45.0 <= rake_norm <= 135.0:
+        return "Thrust"
+    if -135.0 <= rake_norm <= -45.0:
+        return "Normal"
+    if abs(rake_norm) <= 45.0 or abs(rake_norm) >= 135.0:
+        return "Strike-Slip"
+    return "Unknown"
+
+
+def _legacy_fault_type_code(fault_type: str) -> str:
+    """把新 fault_type 标签映射到旧版 TF/NF/SS/UNK 编码。"""
+    mapping = {
+        "Thrust": "TF",
+        "Normal": "NF",
+        "Strike-Slip": "SS",
+        "Unknown": "UNK",
+    }
+    return mapping.get(fault_type, "UNK")
+
+
+def _empty_gcmt_features() -> dict:
+    """返回未匹配 GCMT 时的稳定空特征。"""
+    return {
+        "strike1": np.nan, "dip1": np.nan, "rake1": np.nan,
+        "strike2": np.nan, "dip2": np.nan, "rake2": np.nan,
+        "fault_type": "Unknown",
+        "fault_type_Thrust": 0, "fault_type_Normal": 0,
+        "fault_type_Strike_Slip": 0, "fault_type_Unknown": 1,
+        "fault_type_NF": 0, "fault_type_SS": 0,
+        "fault_type_TF": 0, "fault_type_UNK": 1,
+        "plunge_P": np.nan, "trend_P": np.nan,
+        "plunge_T": np.nan, "trend_T": np.nan,
+        "f_clvd": np.nan,
+        "gcmt_time_diff_seconds": np.nan,
+        "gcmt_distance_km": np.nan,
+        "focal_mechanism_valid": False,
+    }
+
+
+def _row_to_gcmt_features(row: pd.Series, time_diff_seconds: float, distance_km: float) -> dict:
+    """把一条 GCMT 匹配记录转为模型特征。"""
+    rake1 = float(row.get("rake1", np.nan))
+    fault_type = classify_fault_type_from_rake(rake1)
+    legacy_code = _legacy_fault_type_code(fault_type)
+    features = _empty_gcmt_features()
+    features.update(
+        {
+            "strike1": float(row.get("strike1", np.nan)),
+            "dip1": float(row.get("dip1", np.nan)),
+            "rake1": rake1,
+            "strike2": float(row.get("strike2", np.nan)),
+            "dip2": float(row.get("dip2", np.nan)),
+            "rake2": float(row.get("rake2", np.nan)),
+            "fault_type": fault_type,
+            "fault_type_Thrust": 1 if fault_type == "Thrust" else 0,
+            "fault_type_Normal": 1 if fault_type == "Normal" else 0,
+            "fault_type_Strike_Slip": 1 if fault_type == "Strike-Slip" else 0,
+            "fault_type_Unknown": 1 if fault_type == "Unknown" else 0,
+            "fault_type_NF": 1 if legacy_code == "NF" else 0,
+            "fault_type_SS": 1 if legacy_code == "SS" else 0,
+            "fault_type_TF": 1 if legacy_code == "TF" else 0,
+            "fault_type_UNK": 1 if legacy_code == "UNK" else 0,
+            "plunge_P": float(row.get("plunge_P", np.nan)),
+            "trend_P": float(row.get("trend_P", np.nan)),
+            "plunge_T": float(row.get("plunge_T", np.nan)),
+            "trend_T": float(row.get("trend_T", np.nan)),
+            "f_clvd": float(row.get("f_clvd", np.nan)),
+            "gcmt_time_diff_seconds": float(time_diff_seconds),
+            "gcmt_distance_km": float(distance_km),
+            "focal_mechanism_valid": bool(np.isfinite(row.get("strike1", np.nan))),
+        }
+    )
+    return features
+
+
+def merge_gcmt_features(
+    sequence_df: pd.DataFrame,
+    gcmt_csv_path: str | Path,
+    time_tolerance_seconds: float = 60.0,
+    spatial_radius_km: float = 50.0,
+    earth_radius_km: float = 6371.0,
+    time_col: str = "mainshock_time",
+    lat_col: str = "mainshock_lat",
+    lon_col: str = "mainshock_lon",
+    id_col: str = "mainshock_id",
+) -> pd.DataFrame:
+    """
+    将主震序列表与 Global CMT 震源机制目录近似匹配。
+
+    匹配条件：事件时间差小于 time_tolerance_seconds，且震中距离小于
+    spatial_radius_km。若候选多条，优先选择时间差最小，其次距离最近。
+    """
+    result_df = sequence_df.copy()
+    required_cols = [id_col, time_col, lat_col, lon_col]
+    missing_cols = [col for col in required_cols if col not in result_df.columns]
+    if missing_cols:
+        raise ValueError(f"GCMT 匹配缺少必要字段: {missing_cols}")
+
+    for col in GCMT_FEATURE_COLUMNS:
+        if col in result_df.columns:
+            result_df = result_df.drop(columns=col)
+
+    gcmt_path = Path(gcmt_csv_path)
+    gcmt_df = _load_gcmt_catalog(gcmt_path)
+    empty_template = _empty_gcmt_features()
+    if gcmt_df is None or gcmt_df.empty:
+        feature_rows = [
+            {id_col: row[id_col], **empty_template}
+            for _, row in result_df.iterrows()
+        ]
+        return result_df.merge(pd.DataFrame(feature_rows), on=id_col, how="left")
+
+    seq_times = pd.to_datetime(result_df[time_col], utc=True, errors="coerce")
+    gcmt_df = gcmt_df.sort_values("time").reset_index(drop=True)
+    feature_rows: list[dict] = []
+
+    for idx, row in result_df.iterrows():
+        features = _empty_gcmt_features()
+        ms_time = seq_times.iloc[idx]
+        if pd.notna(ms_time):
+            time_diff_seconds = (
+                (gcmt_df["time"] - ms_time).dt.total_seconds().abs()
+            )
+            time_mask = time_diff_seconds <= float(time_tolerance_seconds)
+            candidates = gcmt_df.loc[time_mask].copy()
+
+            if not candidates.empty:
+                candidate_time_diff = time_diff_seconds.loc[candidates.index].to_numpy()
+                distances = haversine_km(
+                    row[lat_col],
+                    row[lon_col],
+                    candidates["latitude"].to_numpy(),
+                    candidates["longitude"].to_numpy(),
+                    earth_radius_km=earth_radius_km,
+                )
+                spatial_mask = distances <= float(spatial_radius_km)
+                if spatial_mask.any():
+                    valid_candidates = candidates.loc[spatial_mask].copy()
+                    valid_time_diff = candidate_time_diff[spatial_mask]
+                    valid_distances = distances[spatial_mask]
+                    order = np.lexsort((valid_distances, valid_time_diff))
+                    best_pos = int(order[0])
+                    features = _row_to_gcmt_features(
+                        valid_candidates.iloc[best_pos],
+                        time_diff_seconds=float(valid_time_diff[best_pos]),
+                        distance_km=float(valid_distances[best_pos]),
+                    )
+
+        feature_rows.append({id_col: row[id_col], **features})
+
+    focal_df = pd.DataFrame(feature_rows)
+    return result_df.merge(focal_df, on=id_col, how="left")
+
+
 def match_focal_mechanism(
     mainshock_time,
     mainshock_lat: float,

@@ -14,7 +14,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
 from src.features import (
-    _load_gcmt_catalog,
     calculate_bath_law_features,
     calculate_geological_features,
     calculate_productivity_index,
@@ -24,7 +23,7 @@ from src.features import (
     estimate_gr_b_value,
     fit_omori_utsu,
     load_plate_boundaries,
-    match_focal_mechanism,
+    merge_gcmt_features,
 )
 from src.utils import haversine_km
 
@@ -307,30 +306,20 @@ def main() -> None:
     gcmt_path = cfg["paths"].get("gcmt_catalog_csv")
     gcmt_cfg = cfg.get("phase1", {}).get("gcmt", {})
     gcmt_enabled = bool(gcmt_cfg.get("enabled", True))
-    focal_features: list[dict] = []
     if gcmt_enabled and gcmt_path:
         gcmt_path = resolve_project_path(gcmt_path)
         ensure_gcmt_catalog(gcmt_path, gcmt_cfg)
-        gcmt_df = _load_gcmt_catalog(gcmt_path)
-        if gcmt_df is not None and not gcmt_df.empty:
-            for row in tqdm(rows, desc="匹配 GCMT 震源机制"):
-                fm = match_focal_mechanism(
-                    mainshock_time=row.mainshock_time,
-                    mainshock_lat=row.mainshock_lat,
-                    mainshock_lon=row.mainshock_lon,
-                    gcmt_df=gcmt_df,
-                    time_window_days=float(gcmt_cfg.get("time_window_days", 1.0)),
-                    spatial_radius_km=float(gcmt_cfg.get("spatial_radius_km", 200.0)),
-                    earth_radius_km=float(phase1_cfg.get("earth_radius_km", 6371.0)),
-                )
-                fm["mainshock_id"] = row.mainshock_id
-                focal_features.append(fm)
-            print(f"GCMT 匹配完成: {sum(f['focal_mechanism_valid'] for f in focal_features)} 条有效")
+        if gcmt_path.exists():
+            merged_df = merge_gcmt_features(
+                merged_df,
+                gcmt_csv_path=gcmt_path,
+                time_tolerance_seconds=float(gcmt_cfg.get("time_tolerance_seconds", 60.0)),
+                spatial_radius_km=float(gcmt_cfg.get("spatial_radius_km", 50.0)),
+                earth_radius_km=float(phase1_cfg.get("earth_radius_km", 6371.0)),
+            )
+            print(f"GCMT 匹配完成: {int(merged_df['focal_mechanism_valid'].sum())} 条有效")
         else:
             print("⚠ GCMT 目录不可用，跳过震源机制解特征")
-    if focal_features:
-        focal_df = pd.DataFrame(focal_features)
-        merged_df = merged_df.merge(focal_df, on="mainshock_id", how="left")
     else:
         print("⚠ 跳过震源机制解特征（GCMT 目录未找到或被禁用）")
 

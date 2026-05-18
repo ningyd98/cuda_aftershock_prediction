@@ -20,6 +20,7 @@ from src.dataset import (
     EarthquakeSequenceDataset,
     SequenceBuildConfig,
     earthquake_collate_fn,
+    fit_dataset_preprocessors,
 )
 from src.models_gnn import STGNNPredictor, stgnn_asymmetric_loss
 from src.utils import set_random_seed
@@ -35,6 +36,7 @@ EXPLICIT_FEATURES = {
     "plate_boundary_distance_km",
     "strike1", "dip1", "rake1", "strike2", "dip2", "rake2",
     "plunge_P", "trend_P", "plunge_T", "trend_T", "f_clvd",
+    "gcmt_time_diff_seconds", "gcmt_distance_km",
     "focal_mechanism_valid",
 }
 EXCLUDE_COLS = {
@@ -67,10 +69,18 @@ def train_one_epoch(model, dataloader, optimizer, device, late_weight=2.0):
     for batch in dataloader:
         seq_x = batch["seq_x"].to(device)
         global_x = batch["global_x"].to(device)
+        graph_coords_km = batch["graph_coords_km"].to(device)
+        graph_time_days = batch["graph_time_days"].to(device)
         y = batch["y"].to(device)
         mask = batch["seq_padding_mask"].to(device)
         optimizer.zero_grad()
-        preds = model(seq_x, global_x, mask)
+        preds = model(
+            seq_x,
+            global_x,
+            mask,
+            graph_coords_km=graph_coords_km,
+            graph_time_days=graph_time_days,
+        )
         loss = stgnn_asymmetric_loss(preds, y, late_weight=late_weight)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -87,17 +97,29 @@ def evaluate_model(model, dataloader, device, late_weight=2.0):
     for batch in dataloader:
         seq_x = batch["seq_x"].to(device)
         global_x = batch["global_x"].to(device)
+        graph_coords_km = batch["graph_coords_km"].to(device)
+        graph_time_days = batch["graph_time_days"].to(device)
         y = batch["y"].to(device)
         mask = batch["seq_padding_mask"].to(device)
-        preds = model(seq_x, global_x, mask)
+        preds = model(
+            seq_x,
+            global_x,
+            mask,
+            graph_coords_km=graph_coords_km,
+            graph_time_days=graph_time_days,
+        )
         all_preds.append(preds.cpu().numpy())
         all_targets.append(y.cpu().numpy())
     preds_arr = np.clip(np.concatenate(all_preds, axis=0), a_min=0.0, a_max=None)
     targets_arr = np.concatenate(all_targets, axis=0)
+    preds_eval = preds_arr.copy()
+    targets_eval = targets_arr.copy()
+    preds_eval[:, 1] = np.expm1(np.clip(preds_eval[:, 1], 0.0, 50.0))
+    targets_eval[:, 1] = np.expm1(np.clip(targets_eval[:, 1], 0.0, 50.0))
     from src.evaluator import calculate_metrics
     return calculate_metrics(
-        y_true_mag=targets_arr[:, 0], y_pred_mag=preds_arr[:, 0],
-        y_true_time=targets_arr[:, 1], y_pred_time=preds_arr[:, 1],
+        y_true_mag=targets_eval[:, 0], y_pred_mag=preds_eval[:, 0],
+        y_true_time=targets_eval[:, 1], y_pred_time=preds_eval[:, 1],
         late_weight=late_weight,
     )
 
@@ -111,6 +133,7 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--node-hidden", type=int, default=64)
     parser.add_argument("--gnn-layers", type=int, default=3)
+    parser.add_argument("--gnn-radius-km", type=float, default=100.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save-dir", type=Path, default=PROJECT_ROOT / "data" / "models")
     parser.add_argument("--device", type=str, default="cpu")
@@ -142,16 +165,25 @@ def main():
     n_val = max(1, int(len(df) * 0.2))
     train_df = df.iloc[:-n_val].copy()
     val_df = df.iloc[-n_val:].copy()
+    preprocessors = fit_dataset_preprocessors(
+        sequence_df=train_df,
+        event_catalog_df=event_df,
+        global_feature_cols=global_cols,
+        target_cols=TARGET_COLS,
+        config=seq_config,
+        scaler_type="robust",
+        add_missing_indicators=True,
+    )
 
     train_set = EarthquakeSequenceDataset(
         sequence_df=train_df, event_catalog_df=event_df,
         global_feature_cols=global_cols, target_cols=TARGET_COLS, config=seq_config,
-        fit_preprocessors=True, scaler_type="robust",
+        preprocessors=preprocessors, fit_preprocessors=False,
     )
     val_set = EarthquakeSequenceDataset(
         sequence_df=val_df, event_catalog_df=event_df,
         global_feature_cols=global_cols, target_cols=TARGET_COLS, config=seq_config,
-        preprocessors=train_set.preprocessors, fit_preprocessors=False,
+        preprocessors=preprocessors, fit_preprocessors=False,
     )
 
     train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, collate_fn=earthquake_collate_fn)
@@ -169,6 +201,7 @@ def main():
         global_feature_dim=train_set.global_feature_dim,
         node_hidden_dim=args.node_hidden,
         num_gnn_layers=args.gnn_layers,
+        gnn_radius_km=args.gnn_radius_km,
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -195,8 +228,10 @@ def main():
                 "global_feature_cols": global_cols,
                 "global_indicator_cols": train_set.preprocessors.global_indicator_cols,
                 "preprocessor_path": preprocessor_path.name,
+                "time_target_transform": "log1p",
                 "node_hidden_dim": args.node_hidden,
                 "num_gnn_layers": args.gnn_layers,
+                "gnn_radius_km": args.gnn_radius_km,
                 "trained_at": datetime.now(timezone.utc).isoformat(),
                 "best_val_metrics": val_metrics,
             }

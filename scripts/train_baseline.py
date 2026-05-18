@@ -50,6 +50,8 @@ EXPLICIT_FEATURES = {
     "plunge_T",
     "trend_T",
     "f_clvd",
+    "gcmt_time_diff_seconds",
+    "gcmt_distance_km",
     "focal_mechanism_valid",
 }
 EXCLUDE_COLS = {

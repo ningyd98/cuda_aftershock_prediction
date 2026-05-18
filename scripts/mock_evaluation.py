@@ -78,6 +78,7 @@ def select_feature_cols(df: pd.DataFrame) -> list[str]:
         "plate_boundary_distance_km",
         "strike1", "dip1", "rake1", "strike2", "dip2", "rake2",
         "plunge_P", "trend_P", "plunge_T", "trend_T", "f_clvd",
+        "gcmt_time_diff_seconds", "gcmt_distance_km",
         "focal_mechanism_valid",
     }
     EXCLUDE = {

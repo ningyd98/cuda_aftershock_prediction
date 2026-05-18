@@ -20,6 +20,7 @@ from src.dataset import (
     EarthquakeSequenceDataset,
     SequenceBuildConfig,
     earthquake_collate_fn,
+    fit_dataset_preprocessors,
 )
 from src.models_dl import Seq2SeqAftershockPredictor, asymmetric_time_mse_loss
 from src.utils import set_random_seed
@@ -56,6 +57,8 @@ EXPLICIT_FEATURES = {
     "plunge_T",
     "trend_T",
     "f_clvd",
+    "gcmt_time_diff_seconds",
+    "gcmt_distance_km",
     "focal_mechanism_valid",
 }
 EXCLUDE_COLS = {
@@ -142,13 +145,19 @@ def evaluate_model(
     targets_arr = np.concatenate(all_targets, axis=0)
     preds_arr = np.clip(preds_arr, a_min=0.0, a_max=None)
 
+    # Dataset 中时间目标为 log1p 尺度；评估前必须还原到真实天数。
+    preds_eval = preds_arr.copy()
+    targets_eval = targets_arr.copy()
+    preds_eval[:, 1] = np.expm1(np.clip(preds_eval[:, 1], 0.0, 50.0))
+    targets_eval[:, 1] = np.expm1(np.clip(targets_eval[:, 1], 0.0, 50.0))
+
     from src.evaluator import calculate_metrics
 
     return calculate_metrics(
-        y_true_mag=targets_arr[:, 0],
-        y_pred_mag=preds_arr[:, 0],
-        y_true_time=targets_arr[:, 1],
-        y_pred_time=preds_arr[:, 1],
+        y_true_mag=targets_eval[:, 0],
+        y_pred_mag=preds_eval[:, 0],
+        y_true_time=targets_eval[:, 1],
+        y_pred_time=preds_eval[:, 1],
         late_weight=late_weight,
     )
 
@@ -215,14 +224,23 @@ def main() -> None:
     seq_config = SequenceBuildConfig(obs_days=3.0, spatial_radius_km=100.0, max_seq_len=256)
 
     train_df, val_df = time_series_train_val_split(df, val_ratio=0.2)
+    preprocessors = fit_dataset_preprocessors(
+        sequence_df=train_df,
+        event_catalog_df=event_df,
+        global_feature_cols=global_cols,
+        target_cols=TARGET_COLS,
+        config=seq_config,
+        scaler_type="robust",
+        add_missing_indicators=True,
+    )
     train_dataset = EarthquakeSequenceDataset(
         sequence_df=train_df,
         event_catalog_df=event_df,
         global_feature_cols=global_cols,
         target_cols=TARGET_COLS,
         config=seq_config,
-        fit_preprocessors=True,
-        scaler_type="robust",
+        preprocessors=preprocessors,
+        fit_preprocessors=False,
     )
     val_dataset = EarthquakeSequenceDataset(
         sequence_df=val_df,
@@ -230,7 +248,7 @@ def main() -> None:
         global_feature_cols=global_cols,
         target_cols=TARGET_COLS,
         config=seq_config,
-        preprocessors=train_dataset.preprocessors,
+        preprocessors=preprocessors,
         fit_preprocessors=False,
     )
 
@@ -281,6 +299,7 @@ def main() -> None:
                 "global_feature_cols": global_cols,
                 "global_indicator_cols": train_dataset.preprocessors.global_indicator_cols,
                 "preprocessor_path": preprocessor_path.name,
+                "time_target_transform": "log1p",
                 "d_model": args.d_model,
                 "nhead": args.nhead,
                 "num_layers": args.num_layers,

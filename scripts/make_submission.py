@@ -13,7 +13,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
 from src.features import (
-    _load_gcmt_catalog,
     calculate_bath_law_features,
     calculate_geological_features,
     calculate_productivity_index,
@@ -23,7 +22,7 @@ from src.features import (
     estimate_gr_b_value,
     fit_omori_utsu,
     load_plate_boundaries,
-    match_focal_mechanism,
+    merge_gcmt_features,
 )
 from src.utils import haversine_km, seismic_moment_from_mw
 
@@ -126,6 +125,8 @@ def build_single_sequence_features(
     obs_days: float = 3.0,
     spatial_radius_km: float = 100.0,
     earth_radius_km: float = 6371.0,
+    gcmt_time_tolerance_seconds: float = 60.0,
+    gcmt_spatial_radius_km: float = 50.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """为单个待预测主震实时构建阶段一特征。"""
     mainshock = pick_mainshock(event_df)
@@ -204,19 +205,13 @@ def build_single_sequence_features(
 
     feature_df = pd.DataFrame([base_features])
     if gcmt_catalog_path is not None and gcmt_catalog_path.exists():
-        gcmt_df = _load_gcmt_catalog(gcmt_catalog_path)
-        if gcmt_df is not None and not gcmt_df.empty:
-            focal_features = match_focal_mechanism(
-                mainshock_time=mainshock["time"],
-                mainshock_lat=float(mainshock["latitude"]),
-                mainshock_lon=float(mainshock["longitude"]),
-                gcmt_df=gcmt_df,
-                earth_radius_km=earth_radius_km,
-            )
-            feature_df = pd.concat(
-                [feature_df, pd.DataFrame([focal_features])],
-                axis=1,
-            )
+        feature_df = merge_gcmt_features(
+            feature_df,
+            gcmt_csv_path=gcmt_catalog_path,
+            time_tolerance_seconds=gcmt_time_tolerance_seconds,
+            spatial_radius_km=gcmt_spatial_radius_km,
+            earth_radius_km=earth_radius_km,
+        )
 
     boundaries_gdf = load_plate_boundaries(plate_boundaries_path)
     geology_df = calculate_geological_features(feature_df, boundaries_gdf)
@@ -288,6 +283,14 @@ def load_dataset_preprocessors(meta: dict, meta_path: Path, default_name: str):
     return joblib.load(preprocessor_path)
 
 
+def inverse_deep_time_transform(preds: np.ndarray, meta: dict) -> np.ndarray:
+    """深度模型若使用 log1p 时间目标，推理输出需还原为真实天数。"""
+    restored = np.asarray(preds, dtype=float).copy()
+    if meta.get("time_target_transform") == "log1p":
+        restored[:, 1] = np.expm1(np.clip(restored[:, 1], 0.0, 50.0))
+    return restored
+
+
 def predict_with_dl(
     dl_model_path: Path,
     dl_meta_path: Path,
@@ -351,7 +354,7 @@ def predict_with_dl(
             global_x = batch["global_x"].to(device)
             mask = batch["seq_padding_mask"].to(device)
             preds = model(seq_x, global_x, mask)
-            return preds.cpu().numpy().reshape(1, 2)
+            return inverse_deep_time_transform(preds.cpu().numpy().reshape(1, 2), dl_meta)
     except Exception as exc:
         print(f"   DL 模型预测失败: {exc}")
         return None
@@ -395,6 +398,7 @@ def predict_with_gnn(
             global_feature_dim=gnn_meta["global_feature_dim"],
             node_hidden_dim=gnn_meta.get("node_hidden_dim", 64),
             num_gnn_layers=gnn_meta.get("num_gnn_layers", 3),
+            gnn_radius_km=gnn_meta.get("gnn_radius_km", 100.0),
         )
         model.load_state_dict(torch.load(gnn_model_path, map_location=device, weights_only=True))
         model.to(device)
@@ -414,9 +418,17 @@ def predict_with_gnn(
         with torch.no_grad():
             seq_x = batch["seq_x"].to(device)
             global_x = batch["global_x"].to(device)
+            graph_coords_km = batch["graph_coords_km"].to(device)
+            graph_time_days = batch["graph_time_days"].to(device)
             mask = batch["seq_padding_mask"].to(device)
-            preds = model(seq_x, global_x, mask)
-            return preds.cpu().numpy().reshape(1, 2)
+            preds = model(
+                seq_x,
+                global_x,
+                mask,
+                graph_coords_km=graph_coords_km,
+                graph_time_days=graph_time_days,
+            )
+            return inverse_deep_time_transform(preds.cpu().numpy().reshape(1, 2), gnn_meta)
     except Exception as exc:
         print(f"   GNN 模型预测失败: {exc}")
         return None
@@ -491,6 +503,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--obs-days", type=float, default=3.0)
     parser.add_argument("--spatial-radius-km", type=float, default=100.0)
     parser.add_argument("--earth-radius-km", type=float, default=6371.0)
+    parser.add_argument("--gcmt-time-tolerance-seconds", type=float, default=60.0)
+    parser.add_argument("--gcmt-spatial-radius-km", type=float, default=50.0)
     parser.add_argument(
         "--allow-rule-fallback",
         action="store_true",
@@ -531,6 +545,8 @@ def main() -> None:
         obs_days=args.obs_days,
         spatial_radius_km=args.spatial_radius_km,
         earth_radius_km=args.earth_radius_km,
+        gcmt_time_tolerance_seconds=args.gcmt_time_tolerance_seconds,
+        gcmt_spatial_radius_km=args.gcmt_spatial_radius_km,
     )
 
     mainshock_id = str(feature_df.loc[0, "mainshock_id"])

@@ -8,41 +8,70 @@ from torch import nn
 
 class SpatialGraphConv(nn.Module):
     """
-    空间图卷积层：基于事件间距离的高斯核邻接矩阵。
+    有向时空图卷积层：距离近且时间更早的事件向未来事件传递信息。
 
-    A_ij = exp(-d_ij² / (2σ²)), normsed row-wise.
+    邻接矩阵使用 A[target, source] 约定：
+    - 距离 d(target, source) < radius_km
+    - time[source] < time[target]
+    - 权重为 exp(-d² / (2σ²))，按 target 行归一化
     """
 
-    def __init__(self, in_dim: int, out_dim: int, sigma: float = 50.0) -> None:
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        sigma: float = 50.0,
+        radius_km: float = 100.0,
+    ) -> None:
         super().__init__()
         self.sigma = sigma
+        self.radius_km = radius_km
         self.linear = nn.Linear(in_dim, out_dim)
 
-    def forward(self, x: torch.Tensor, coords: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        coords: torch.Tensor,
+        event_times: torch.Tensor | None,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
         """
         Args:
             x: (B, N, D_in) node features
-            coords: (B, N, 2) node spatial coordinates (rel_x_km, rel_y_km)
+            coords: (B, N, 2) node spatial coordinates in km
+            event_times: (B, N) elapsed days after mainshock
             mask: (B, N) True = padding
         Returns:
             (B, N, D_out) updated node features
         """
         B, N, _ = x.shape
-        # Pairwise distance matrix
+
         coord_diff = coords.unsqueeze(2) - coords.unsqueeze(1)  # (B, N, N, 2)
         dists = torch.norm(coord_diff, dim=-1)  # (B, N, N)
-        # Gaussian kernel adjacency
+
         adj = torch.exp(-(dists ** 2) / (2 * self.sigma ** 2))  # (B, N, N)
-        # Mask invalid nodes
-        valid_mask = (~mask).float().unsqueeze(-1)  # (B, N, 1)
-        adj = adj * valid_mask * valid_mask.transpose(1, 2)
-        # Row normalization
+        adj = adj * (dists < self.radius_km).float()
+
+        if event_times is not None:
+            # A[target, source]，只允许过去 source 指向未来 target。
+            source_times = event_times.unsqueeze(1)
+            target_times = event_times.unsqueeze(2)
+            causal_mask = source_times < target_times
+            adj = adj * causal_mask.float()
+        else:
+            # 兼容旧调用：没有真实时间时至少去掉自环。
+            eye = torch.eye(N, device=x.device, dtype=torch.float32).unsqueeze(0)
+            adj = adj * (1.0 - eye)
+
+        valid_nodes = (~mask).float()
+        valid_target = valid_nodes.unsqueeze(2)
+        valid_source = valid_nodes.unsqueeze(1)
+        adj = adj * valid_target * valid_source
+
         deg = adj.sum(dim=-1, keepdim=True).clamp_min(1e-8)
         adj_norm = adj / deg
-        # Message passing
-        msg = self.linear(x)  # (B, N, D_out)
-        out = torch.bmm(adj_norm, msg)  # (B, N, D_out)
-        return out
+        messages = self.linear(x)  # (B, N, D_out)
+        return torch.bmm(adj_norm, messages)  # target rows aggregate source columns
 
 
 class TemporalGRU(nn.Module):
@@ -101,6 +130,7 @@ class STGNNPredictor(nn.Module):
         node_hidden_dim: int = 64,
         num_gnn_layers: int = 3,
         gnn_sigma: float = 50.0,
+        gnn_radius_km: float = 100.0,
         gru_hidden_dim: int = 64,
         gru_layers: int = 2,
         global_hidden_dim: int = 128,
@@ -121,7 +151,12 @@ class STGNNPredictor(nn.Module):
         for _ in range(num_gnn_layers):
             self.gnn_blocks.append(
                 nn.ModuleDict({
-                    "spatial": SpatialGraphConv(node_hidden_dim, node_hidden_dim, sigma=gnn_sigma),
+                    "spatial": SpatialGraphConv(
+                        node_hidden_dim,
+                        node_hidden_dim,
+                        sigma=gnn_sigma,
+                        radius_km=gnn_radius_km,
+                    ),
                     "temporal": TemporalGRU(node_hidden_dim, gru_hidden_dim, num_layers=gru_layers),
                     "norm1": nn.LayerNorm(node_hidden_dim),
                     "norm2": nn.LayerNorm(node_hidden_dim),
@@ -151,20 +186,24 @@ class STGNNPredictor(nn.Module):
         seq_x: torch.Tensor,
         global_x: torch.Tensor,
         seq_padding_mask: torch.Tensor,
+        graph_coords_km: torch.Tensor | None = None,
+        graph_time_days: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
             seq_x: (B, N, event_feature_dim)
             global_x: (B, global_feature_dim)
             seq_padding_mask: (B, N) True = padding
+            graph_coords_km: (B, N, 2) 未标准化空间坐标，单位 km
+            graph_time_days: (B, N) 未标准化相对时间，单位天
         Returns:
             (B, 2) predictions
         """
         B, N, _ = seq_x.shape
 
-        # Extract spatial coordinates from seq_x
-        # seq_x columns: [dt_days, log_dt_days, rel_x_km, rel_y_km, distance_km, depth, mag]
-        coords = seq_x[:, :, 2:4]  # (B, N, 2) — rel_x_km, rel_y_km
+        # 兼容旧调用：优先使用 Dataset 提供的真实物理坐标/时间。
+        coords = graph_coords_km if graph_coords_km is not None else seq_x[:, :, 2:4]
+        event_times = graph_time_days if graph_time_days is not None else seq_x[:, :, 0]
 
         # Node projection
         h = self.node_proj(seq_x)  # (B, N, node_hidden_dim)
@@ -172,7 +211,7 @@ class STGNNPredictor(nn.Module):
         # GNN blocks
         for block in self.gnn_blocks:
             h_res = h
-            h = block["spatial"](h, coords, seq_padding_mask)
+            h = block["spatial"](h, coords, event_times, seq_padding_mask)
             h = block["norm1"](h + h_res)
             h = block["dropout"](h)
 
