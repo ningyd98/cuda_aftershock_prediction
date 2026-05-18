@@ -56,3 +56,44 @@ parallel:
   backend: loky
   verbose: 0
   max_nbytes: 64M
+
+# ============================================================
+#  Transformer 深度学习模型配置
+# ============================================================
+transformer:
+  # --- 序列构建 ---
+  obs_days: 3.0
+  spatial_radius_km: 100.0
+  earth_radius_km: 6371.0
+  max_seq_len: 256
+
+  # --- 模型架构 ---
+  d_model: 128
+  nhead: 4
+  num_layers: 3
+  dim_feedforward: 256
+  dropout: 0.1
+  global_hidden_dim: 128
+  fusion_hidden_dim: 128
+
+  # --- 训练超参 ---
+  epochs: 50
+  batch_size: 32
+  lr: 0.001
+  weight_decay: 0.0001
+  warmup_steps: 100
+  grad_clip_norm: 1.0
+  late_weight: 2.0
+
+  # --- 预处理器 ---
+  scaler_type: robust
+  add_missing_indicators: true
+  time_target_transform: log1p
+
+  # --- OOF 验证 ---
+  n_splits: 5
+  purge_days: 30.0
+
+  # --- Early Stopping ---
+  early_stopping_patience: 10
+  early_stopping_min_delta: 0.001
