@@ -24,7 +24,7 @@ from src.dataset import (
     fit_dataset_preprocessors,
 )
 from src.models_dl import Seq2SeqAftershockPredictor, asymmetric_time_mse_loss
-from src.utils import get_torch_device, set_random_seed
+from src.utils import get_torch_device, set_random_seed, setup_cuda, try_torch_compile
 
 
 TARGET_COLS = ["target_max_mag", "target_time_to_max_days"]
@@ -200,7 +200,12 @@ def _run_oof_for_dl(
     args: argparse.Namespace,
 ) -> pd.DataFrame:
     """TimeSeriesSplit OOF 预测并输出 oof_predictions.csv。"""
-    device = get_torch_device(args.device)
+    device = setup_cuda(
+        args.device,
+        deterministic=getattr(args, "cuda_deterministic", False),
+        allow_tf32=getattr(args, "cuda_allow_tf32", True),
+        matmul_precision=getattr(args, "cuda_matmul_precision", "high"),
+    )
     train_df = df.sort_values(TIME_COL).reset_index(drop=True)
     splitter = TimeSeriesSplit(n_splits=args.n_splits)
     purge_delta = pd.Timedelta(days=float(getattr(args, "purge_days", 30.0)))
@@ -209,6 +214,10 @@ def _run_oof_for_dl(
 
     oof_preds = np.full((len(train_df), len(TARGET_COLS)), np.nan, dtype=float)
     fold_records: list[dict] = []
+
+    num_workers = getattr(args, "num_workers", 0)
+    pin_memory = getattr(args, "pin_memory", True) and device.type == "cuda"
+    use_compile = getattr(args, "use_torch_compile", False)
 
     fold_iter = tqdm(
         enumerate(splitter.split(train_df), start=1),
@@ -263,10 +272,16 @@ def _run_oof_for_dl(
             fit_preprocessors=False,
         )
 
-        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
-                                  collate_fn=earthquake_collate_fn, num_workers=0)
-        valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False,
-                                  collate_fn=earthquake_collate_fn, num_workers=0)
+        train_loader = DataLoader(
+            train_dataset, batch_size=args.batch_size, shuffle=True,
+            collate_fn=earthquake_collate_fn,
+            num_workers=num_workers, pin_memory=pin_memory,
+        )
+        valid_loader = DataLoader(
+            valid_dataset, batch_size=args.batch_size, shuffle=False,
+            collate_fn=earthquake_collate_fn,
+            num_workers=num_workers, pin_memory=pin_memory,
+        )
 
         model = Seq2SeqAftershockPredictor(
             event_feature_dim=len(train_dataset.event_feature_cols),
@@ -275,6 +290,9 @@ def _run_oof_for_dl(
             nhead=args.nhead,
             num_layers=args.num_layers,
         ).to(device)
+
+        if use_compile:
+            model = try_torch_compile(model)
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
@@ -408,6 +426,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--purge-days", type=float, default=30.0, help="OOF purge 天数")
     parser.add_argument("--oof-output", type=Path, default=None, help="OOF 预测输出路径")
     parser.add_argument("--late-weight", type=float, default=2.0, help="预测偏晚惩罚权重")
+    # CUDA / 性能
+    parser.add_argument("--num-workers", type=int, default=0, help="DataLoader workers")
+    parser.add_argument("--pin-memory", action="store_true", default=True, help="pin_memory 加速")
+    parser.add_argument("--no-pin-memory", dest="pin_memory", action="store_false",
+                        help="禁用 pin_memory")
+    parser.add_argument("--use-torch-compile", action="store_true", help="torch.compile 加速")
+    parser.add_argument("--cuda-deterministic", action="store_true",
+                        help="cudnn deterministic 可复现模式")
+    parser.add_argument("--cuda-allow-tf32", action="store_true", default=True,
+                        help="允许 TF32 (Ampere+ GPU)")
+    parser.add_argument("--cuda-matmul-precision", type=str, default="high",
+                        choices=["highest", "high", "medium"])
     return parser.parse_args()
 
 
@@ -447,8 +477,17 @@ def main() -> None:
         return
 
     # ---- 常规训练模式 ----
-    device = get_torch_device(args.device)
+    device = setup_cuda(
+        args.device,
+        deterministic=getattr(args, "cuda_deterministic", False),
+        allow_tf32=getattr(args, "cuda_allow_tf32", True),
+        matmul_precision=getattr(args, "cuda_matmul_precision", "high"),
+    )
     print(f"设备: {device}")
+
+    num_workers = getattr(args, "num_workers", 0)
+    pin_memory = getattr(args, "pin_memory", True) and device.type == "cuda"
+    use_compile = getattr(args, "use_torch_compile", False)
 
     # 加载数据
     features_path = resolve_project_path(args.features)
@@ -500,11 +539,13 @@ def main() -> None:
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
-        collate_fn=earthquake_collate_fn, num_workers=0,
+        collate_fn=earthquake_collate_fn,
+        num_workers=num_workers, pin_memory=pin_memory,
     )
     val_loader = DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False,
-        collate_fn=earthquake_collate_fn, num_workers=0,
+        collate_fn=earthquake_collate_fn,
+        num_workers=num_workers, pin_memory=pin_memory,
     )
 
     print(f"训练样本: {len(train_dataset)}, 验证样本: {len(val_dataset)}")
@@ -512,6 +553,7 @@ def main() -> None:
     print(f"全局输入维: {train_dataset.global_feature_dim}")
     print(f"缺失指示列数: {len(train_dataset.preprocessors.global_indicator_cols)}")
     print(f"事件特征维: {len(train_dataset.event_feature_cols)}")
+    print(f"DataLoader: num_workers={num_workers}, pin_memory={pin_memory}, torch_compile={use_compile}")
 
     model = Seq2SeqAftershockPredictor(
         event_feature_dim=len(train_dataset.event_feature_cols),
@@ -520,6 +562,9 @@ def main() -> None:
         nhead=args.nhead,
         num_layers=args.num_layers,
     ).to(device)
+
+    if use_compile:
+        model = try_torch_compile(model)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)

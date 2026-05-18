@@ -19,7 +19,7 @@ sys.path.append(str(PROJECT_ROOT))
 
 from src.evaluator import calculate_metrics
 from src.models import BaselineLGBM, BaselineXGBoost
-from src.utils import set_random_seed
+from src.utils import set_random_seed, get_lightgbm_device
 
 
 TARGET_COLS = ["target_max_mag", "target_time_to_max_days"]
@@ -206,10 +206,13 @@ def build_model(model_name: str, args: argparse.Namespace):
         "transform_time_target": True,
     }
     if model_name == "baseline":
+        lgbm_device = get_lightgbm_device(getattr(args, "device", "auto"))
         return BaselineLGBM(
             **common_kwargs,
             use_asymmetric_time_objective=args.use_asymmetric_time_objective,
             late_weight=args.late_weight,
+            device=lgbm_device,
+            gpu_use_dp=getattr(args, "gpu_use_dp", False),
         )
     if model_name == "xgboost":
         return BaselineXGBoost(**common_kwargs)
@@ -259,6 +262,18 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=30.0,
         help="每折训练集中剔除距离验证集开始时间不足此天数的样本 (默认 30)",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["auto", "cuda", "cpu"],
+        help="LightGBM 设备: auto, cuda, cpu",
+    )
+    parser.add_argument(
+        "--gpu-use-dp",
+        action="store_true",
+        help="LightGBM GPU 使用双精度（更精确但略慢）",
     )
     return parser.parse_args()
 

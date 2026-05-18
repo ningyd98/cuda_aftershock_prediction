@@ -24,7 +24,7 @@ from src.features import (
     load_plate_boundaries,
     merge_gcmt_features,
 )
-from src.utils import haversine_km, seismic_moment_from_mw, get_torch_device
+from src.utils import haversine_km, seismic_moment_from_mw, setup_cuda, get_torch_device
 
 
 DEFAULT_TARGET_COLS = ["target_max_mag", "target_time_to_max_days"]
@@ -404,8 +404,8 @@ def configure_torch_inference_threads(torch_module) -> None:
 
 
 def _inference_device() -> "torch.device":
-    """推理时优先 MPS (macOS) / CUDA，回退 CPU。"""
-    return get_torch_device("auto")
+    """推理时优先 CUDA / MPS，回退 CPU，启用 cuDNN benchmark。"""
+    return setup_cuda("auto", deterministic=False, allow_tf32=True, benchmark=True)
 
 
 def load_dataset_preprocessors(meta: dict, meta_path: Path, default_name: str):

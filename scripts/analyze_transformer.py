@@ -59,7 +59,7 @@ from src.features import (
     fit_omori_utsu,
     load_plate_boundaries,
 )
-from src.utils import haversine_km, seismic_moment_from_mw, get_torch_device
+from src.utils import haversine_km, seismic_moment_from_mw, get_torch_device, setup_cuda
 
 TARGET_COLS = ["target_max_mag", "target_time_to_max_days"]
 TIME_COL = "mainshock_time"
@@ -87,7 +87,7 @@ def load_model_and_meta(model_dir: Path, device_str: str = "auto"):
     import joblib
     preprocessors = joblib.load(preprocessor_path) if preprocessor_path.exists() else None
 
-    _dev = get_torch_device(device_str)
+    _dev = setup_cuda(device_str, deterministic=False, allow_tf32=True, benchmark=True)
 
     model = Seq2SeqAftershockPredictor(
         event_feature_dim=meta["event_feature_dim"],
@@ -330,7 +330,7 @@ def analyze_single_sequence(
         return {"error": f"Dataset 构建失败: {exc}", "mainshock_id": mainshock_id}
 
     # 预测
-    _dev = get_torch_device(device_str)
+    _dev = setup_cuda(device_str, deterministic=False, allow_tf32=True, benchmark=True)
     with torch.no_grad():
         seq_x = batch["seq_x"].to(_dev)
         global_x = batch["global_x"].to(_dev)
@@ -369,7 +369,7 @@ def analyze_single_sequence(
 
 def main() -> None:
     args = parse_args()
-    _dev = get_torch_device(args.device)
+    _dev = setup_cuda(args.device, deterministic=False, allow_tf32=True, benchmark=True)
     print(f"设备: {_dev}")
 
     # 加载模型

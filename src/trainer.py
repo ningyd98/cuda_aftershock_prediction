@@ -14,9 +14,9 @@ from src.models import BaselineLGBM
 TIME_TARGET_INDEX = 1
 
 
-def _default_model_factory():
+def _default_model_factory(device: str = "cpu"):
     """默认模型工厂：每个 fold 都创建一个全新模型。"""
-    return BaselineLGBM(random_state=42)
+    return BaselineLGBM(random_state=42, device=device)
 
 
 def _format_time(value) -> str:
@@ -93,6 +93,7 @@ def time_series_cv_train(
     time_col: str = "mainshock_time",
     late_weight: float = 2.0,
     scaler_type: str | None = None,
+    device: str = "cpu",
 ) -> tuple[pd.DataFrame, dict]:
     """
     按主震时间排序后进行滚动时间序列交叉验证。
@@ -120,7 +121,7 @@ def time_series_cv_train(
     if len(train_df) <= n_splits:
         raise ValueError("样本数量必须大于 n_splits。")
 
-    factory = model_factory or _default_model_factory
+    factory = model_factory or (lambda: _default_model_factory(device=device))
     splitter = TimeSeriesSplit(n_splits=n_splits)
     fold_records: list[dict] = []
 

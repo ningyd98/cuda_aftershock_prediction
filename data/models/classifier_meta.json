@@ -96,12 +96,12 @@
     "depth_mag_ratio",
     "productivity_per_event"
   ],
-  "threshold": 0.06,
+  "threshold": 0.07,
   "threshold_objective": "f2",
-  "oof_auc": 0.8134,
+  "oof_auc": 0.8128,
   "oof_f2": 0.9117,
-  "oof_precision": 0.6794,
-  "oof_recall": 0.997,
-  "oof_accuracy": 0.682,
+  "oof_precision": 0.6837,
+  "oof_recall": 0.9947,
+  "oof_accuracy": 0.6874,
   "backend": "lightgbm"
 }

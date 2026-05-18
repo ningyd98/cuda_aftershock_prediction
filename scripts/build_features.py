@@ -63,7 +63,7 @@ def ensure_gcmt_catalog(gcmt_path: Path, gcmt_cfg: dict) -> None:
 
 def normalize_event_catalog(raw_df: pd.DataFrame) -> pd.DataFrame:
     """
-    统一原始事件目录字段。
+    统一原始事件目录字段，仅保留特征提取所需列以减少 joblib 序列化开销。
 
     支持 USGS 原始字段，也兼容 test_eq_data 中 Date + Time 的字段形式。
     """
@@ -88,14 +88,31 @@ def normalize_event_catalog(raw_df: pd.DataFrame) -> pd.DataFrame:
     else:
         raise ValueError("事件目录缺少 time 字段，且无法从 Date + Time 合成。")
 
-    required_cols = ["time", "latitude", "longitude", "mag"]
-    missing_cols = [col for col in required_cols if col not in df.columns]
+    # 仅保留特征提取必需列，大幅减少 joblib 序列化开销 (~63MB → ~8MB)
+    keep_cols = ["time", "latitude", "longitude", "mag"]
+    if "depth" in df.columns:
+        keep_cols.append("depth")
+    missing_cols = [col for col in keep_cols if col not in df.columns]
     if missing_cols:
         raise ValueError(f"事件目录缺少必要字段: {missing_cols}")
 
-    df = df.dropna(subset=required_cols)
+    df = df[keep_cols].dropna(subset=["time", "latitude", "longitude", "mag"])
     df = df.sort_values("time").reset_index(drop=True)
     return df
+
+
+# ─── 快速事件索引：二分搜索定位时间窗口 ───
+
+# 模块级全局变量：main() 中初始化，joblib fork 子进程通过 COW 零拷贝继承。
+_EVENT_TS_ARRAY: np.ndarray | None = None
+
+
+def _init_event_ts(event_df: pd.DataFrame) -> None:
+    """从事件目录提取 Unix 秒时间戳数组，供 O(log n) 二分搜索。"""
+    global _EVENT_TS_ARRAY
+    times = pd.to_datetime(event_df["time"], utc=True, errors="coerce")
+    # 直接通过 numpy 转换为 Unix 秒（避免 pandas Series.view 弃用警告）
+    _EVENT_TS_ARRAY = times.to_numpy(dtype="datetime64[ns]").astype("int64").astype("float64") / 1e9
 
 
 def extract_early_aftershocks(
@@ -105,12 +122,26 @@ def extract_early_aftershocks(
     spatial_radius_km: float,
     earth_radius_km: float,
 ) -> pd.DataFrame:
-    """根据基础样本表中的主震信息，重建观测窗口内的早期余震明细。"""
+    """根据基础样本表中的主震信息，重建观测窗口内的早期余震明细。
+
+    使用预构建的 _EVENT_TS_ARRAY 做 O(log n) 二分搜索定位时间窗口。
+    """
     mainshock_time = pd.to_datetime(sequence_row.mainshock_time, utc=True)
     obs_end_time = mainshock_time + pd.Timedelta(days=obs_days)
 
-    time_mask = (event_df["time"] > mainshock_time) & (event_df["time"] <= obs_end_time)
-    candidates = event_df.loc[time_mask].copy()
+    ts_arr = _EVENT_TS_ARRAY
+    if ts_arr is not None and len(ts_arr) == len(event_df):
+        # 二分搜索定位时间窗口 → O(log n)
+        t0 = mainshock_time.value / 1e9
+        t1 = obs_end_time.value / 1e9
+        i0 = int(np.searchsorted(ts_arr, t0, side="right"))
+        i1 = int(np.searchsorted(ts_arr, t1, side="right"))
+        candidates = event_df.iloc[i0:i1].copy() if i0 < i1 else event_df.iloc[:0].copy()
+    else:
+        # 回退：全量 O(n) 扫描
+        mask = (event_df["time"] > mainshock_time) & (event_df["time"] <= obs_end_time)
+        candidates = event_df.loc[mask].copy()
+
     if candidates.empty:
         return candidates
 
@@ -170,6 +201,8 @@ def build_one_sequence_features(
             mainshock_time=sequence_row.mainshock_time,
             mainshock_mag=sequence_row.mainshock_mag,
             obs_days=phase1_cfg["obs_days"],
+            precomputed_gr=gr_features,
+            precomputed_omori=omori_features,
         )
     except Exception:
         etas_features = {
@@ -254,6 +287,7 @@ def main() -> None:
         sequence_df = sequence_df.head(args.limit).copy()
 
     event_df = normalize_event_catalog(pd.read_csv(event_catalog_path))
+    _init_event_ts(event_df)  # 预提取时间戳数组供二分搜索
 
     phase1_cfg = cfg["phase1"]
     gr_kwargs = dict(phase1_cfg["gr"])
@@ -280,11 +314,13 @@ def main() -> None:
     else:
         geology_df = pd.DataFrame({"mainshock_id": sequence_df["mainshock_id"]})
 
+    # batch_size="auto" 让 joblib 自动选择最优批次大小，减少任务分发开销
     results = Parallel(
         n_jobs=parallel_cfg["n_jobs"],
         backend=parallel_cfg["backend"],
         verbose=parallel_cfg.get("verbose", 0),
         max_nbytes=parallel_cfg.get("max_nbytes", "64M"),
+        batch_size="auto",
     )(
         delayed(build_one_sequence_features)(
             sequence_row=row,

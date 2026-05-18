@@ -111,6 +111,8 @@ class BaselineLGBM:
         use_asymmetric_time_objective: bool = False,
         late_weight: float = 2.0,
         transform_time_target: bool = True,
+        device: str = "cpu",
+        gpu_use_dp: bool = False,
         **model_kwargs,
     ) -> None:
         self.random_state = random_state
@@ -127,12 +129,14 @@ class BaselineLGBM:
         self.use_asymmetric_time_objective = use_asymmetric_time_objective
         self.late_weight = late_weight
         self.transform_time_target = transform_time_target
+        self.device = device
+        self.gpu_use_dp = gpu_use_dp
         self.model_kwargs = model_kwargs
         self.backend = "lightgbm"
         self.model = self._build_model()
 
     def _build_model(self):
-        """构建多输出回归器。"""
+        """构建多输出回归器，支持 GPU 加速。"""
         try:
             from lightgbm import LGBMRegressor
 
@@ -152,8 +156,20 @@ class BaselineLGBM:
                 **self.model_kwargs,
             }
 
+            # GPU 加速：LightGBM 支持 device="cuda"
+            if self.device == "cuda":
+                common_lgbm_params["device"] = "cuda"
+                # gpu_use_dp: 使用双精度（更精确但略慢）
+                if self.gpu_use_dp:
+                    common_lgbm_params["gpu_use_dp"] = True
+                self.backend = "lightgbm_cuda"
+
             if self.use_asymmetric_time_objective:
-                self.backend = "lightgbm_asymmetric_time"
+                self.backend = (
+                    "lightgbm_asymmetric_time_cuda"
+                    if self.device == "cuda"
+                    else "lightgbm_asymmetric_time"
+                )
                 self.mag_model = LGBMRegressor(
                     objective="regression",
                     **common_lgbm_params,
@@ -190,13 +206,18 @@ class BaselineLGBM:
         use_asymmetric = getattr(self, "use_asymmetric_time_objective", False)
         transform_time = getattr(self, "transform_time_target", False)
         y_array = transform_targets_for_fit(y, transform_time_target=transform_time)
-        if use_asymmetric and self.backend == "lightgbm_asymmetric_time":
+        if use_asymmetric and (self.backend or "").startswith("lightgbm_asymmetric_time"):
             if y_array.ndim != 2 or y_array.shape[1] != 2:
                 raise ValueError("BaselineLGBM 自定义时间目标要求 y 为两列：[震级, 时间]。")
             self.mag_model.fit(X, y_array[:, 0])
             self.time_model.fit(X, y_array[:, 1])
             return self
 
+        if self.model is None:
+            raise RuntimeError(
+                "BaselineLGBM.model 未初始化。"
+                "请检查 use_asymmetric_time_objective 与 backend 配置是否一致。"
+            )
         self.model.fit(X, y_array)
         return self
 
@@ -204,13 +225,18 @@ class BaselineLGBM:
         """预测最大余震震级和发生时间。"""
         use_asymmetric = getattr(self, "use_asymmetric_time_objective", False)
         transform_time = getattr(self, "transform_time_target", False)
-        if use_asymmetric and self.backend == "lightgbm_asymmetric_time":
+        if use_asymmetric and (self.backend or "").startswith("lightgbm_asymmetric_time"):
             mag_pred = np.asarray(self.mag_model.predict(X), dtype=float)
             time_pred = np.asarray(self.time_model.predict(X), dtype=float)
             raw_preds = np.column_stack([mag_pred, time_pred])
             return inverse_transform_model_predictions(
                 raw_preds,
                 transform_time_target=transform_time,
+            )
+        if self.model is None:
+            raise RuntimeError(
+                "BaselineLGBM.model 未初始化。"
+                "请检查 use_asymmetric_time_objective 与 backend 配置是否一致。"
             )
         raw_preds = self.model.predict(X)
         return inverse_transform_model_predictions(

@@ -7,11 +7,27 @@ from collections.abc import Iterable
 import numpy as np
 
 
-def set_random_seed(seed: int = 42) -> None:
+def set_random_seed(seed: int = 42, use_cuda_deterministic: bool = False) -> None:
     """固定常见随机源，保证实验尽可能可复现。"""
     random.seed(seed)
     np.random.seed(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
+
+    try:
+        import torch
+
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+            if use_cuda_deterministic:
+                torch.backends.cudnn.deterministic = True
+                torch.backends.cudnn.benchmark = False
+            else:
+                # 默认开启 benchmark 以自动选择最优卷积算法
+                torch.backends.cudnn.benchmark = True
+    except ImportError:
+        pass
 
 
 def haversine_km(
@@ -45,6 +61,33 @@ def seismic_moment_from_mw(magnitudes: Iterable[float] | np.ndarray) -> np.ndarr
     return 10 ** (1.5 * mags + 4.8)
 
 
+def _is_cuda_available() -> bool:
+    """检查 CUDA 是否可用（含真实设备访问测试）。
+
+    仅 torch.cuda.is_available() 可能返回 True 但实际无法创建 CUDA context
+    （如无 GPU、驱动不匹配等情况），因此增加一次实际设备访问验证。
+    """
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return False
+        # 实际尝试访问设备，确保 CUDA context 可正常创建
+        _ = torch.cuda.get_device_properties(0)
+        return True
+    except Exception:
+        return False
+
+
+def get_cuda_device_name() -> str:
+    """获取 CUDA 设备名称，不可用时返回空字符串。"""
+    if not _is_cuda_available():
+        return ""
+    import torch
+
+    return torch.cuda.get_device_name(0)
+
+
 def get_torch_device(device_str: str = "auto") -> "torch.device":
     """
     按优先级自动选择 PyTorch 设备: CUDA → MPS → CPU。
@@ -60,7 +103,7 @@ def get_torch_device(device_str: str = "auto") -> "torch.device":
 
     normalized = device_str.strip().lower()
     if normalized in ("cuda", "gpu"):
-        if torch.cuda.is_available():
+        if _is_cuda_available():
             return torch.device("cuda")
         raise RuntimeError("CUDA 不可用，无法使用 --device cuda")
     if normalized == "mps":
@@ -70,11 +113,165 @@ def get_torch_device(device_str: str = "auto") -> "torch.device":
     if normalized == "cpu":
         return torch.device("cpu")
     # auto: CUDA → MPS → CPU
-    if torch.cuda.is_available():
+    if _is_cuda_available():
         return torch.device("cuda")
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def setup_cuda(
+    device_str: str = "auto",
+    deterministic: bool = False,
+    allow_tf32: bool = True,
+    matmul_precision: str = "high",
+    benchmark: bool | None = None,
+) -> "torch.device":
+    """
+    一站式 CUDA 环境配置，应在训练/推理入口调用。
+
+    Args:
+        device_str: 设备选择策略 ('auto', 'cuda', 'mps', 'cpu')
+        deterministic: 是否开启 cudnn deterministic 模式
+        allow_tf32: 是否允许 TF32 加速（Ampere+ GPU）
+        matmul_precision: float32 矩阵乘法精度 ('highest', 'high', 'medium')
+        benchmark: 是否开启 cudnn benchmark；None 时自动（deterministic=False → True）
+
+    Returns:
+        torch.device
+
+    Usage:
+        device = setup_cuda()                          # 全自动
+        device = setup_cuda(deterministic=True)         # 可复现模式
+        device = setup_cuda(matmul_precision="medium")  # 更激进的速度优化
+    """
+    import torch
+
+    device = get_torch_device(device_str)
+
+    if device.type == "cuda":
+        # TF32 加速 (Ampere+ GPU)
+        torch.backends.cuda.matmul.allow_tf32 = allow_tf32
+        torch.backends.cudnn.allow_tf32 = allow_tf32
+
+        # CuDNN benchmark
+        if benchmark is None:
+            benchmark = not deterministic
+        torch.backends.cudnn.benchmark = benchmark
+        torch.backends.cudnn.deterministic = deterministic
+
+        # float32 matmul precision (PyTorch 2.0+)
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision(matmul_precision)
+
+        # 打印设备信息（包装 try/except 防止 CUDA context 初始化失败）
+        try:
+            gpu_name = torch.cuda.get_device_name(0)
+            props = torch.cuda.get_device_properties(0)
+            # PyTorch 2.x 用 total_memory，1.x 用 total_mem，兼容二者
+            gpu_mem = getattr(props, "total_memory", getattr(props, "total_mem", 0)) / 1024**3
+            print(f"CUDA 已启用: {gpu_name} ({gpu_mem:.1f} GiB)")
+            print(f"  benchmark={benchmark}, deterministic={deterministic}, "
+                  f"tf32={allow_tf32}, matmul_precision={matmul_precision}")
+        except Exception as exc:
+            print(f"⚠ CUDA 设备信息获取失败: {exc}")
+            print("  CUDA 驱动/库可能不完整，回退到 CPU 模式")
+            return torch.device("cpu")
+
+    elif device.type == "mps":
+        print("MPS (Apple Silicon GPU) 已启用")
+
+    return device
+
+
+def try_torch_compile(model: "torch.nn.Module", warn_on_fail: bool = True) -> "torch.nn.Module":
+    """
+    尝试对模型使用 torch.compile (PyTorch 2.0+)，失败时回退到原模型。
+
+    Args:
+        model: PyTorch 模型
+        warn_on_fail: 编译失败时是否打印警告
+
+    Returns:
+        编译后的模型（成功）或原模型（失败）
+    """
+    import torch
+
+    if not hasattr(torch, "compile"):
+        if warn_on_fail:
+            print("⚠ torch.compile 需要 PyTorch >= 2.0，当前版本不支持，跳过编译")
+        return model
+
+    try:
+        compiled = torch.compile(model, dynamic=False)
+        print("✓ torch.compile 编译成功")
+        return compiled
+    except Exception as exc:
+        if warn_on_fail:
+            print(f"⚠ torch.compile 编译失败: {exc}，回退到 eager 模式")
+        return model
+
+
+# 缓存 LightGBM CUDA 检测结果，避免每次调用都做昂贵测试
+_lightgbm_cuda_cache: bool | None = None
+
+
+def _is_lightgbm_cuda_available() -> bool:
+    """检测 LightGBM 是否编译了 CUDA 支持。
+
+    不同于 _is_cuda_available()（检测 PyTorch/torch 的 CUDA），
+    本函数会实际尝试用 LightGBM 创建 CUDA Booster 来确认 LightGBM 本身支持 CUDA。
+    结果会被缓存，后续调用直接返回缓存值。
+    """
+    global _lightgbm_cuda_cache
+    if _lightgbm_cuda_cache is not None:
+        return _lightgbm_cuda_cache
+
+    # 先确认系统有 GPU，否则直接跳过昂贵的 LightGBM 测试
+    if not _is_cuda_available():
+        _lightgbm_cuda_cache = False
+        return False
+
+    try:
+        import numpy as np
+        import lightgbm as lgb
+
+        X = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        y = np.array([1.0, 2.0], dtype=np.float32)
+        ds = lgb.Dataset(X, label=y, params={"verbose": -1})
+        lgb.train(
+            {"device": "cuda", "num_leaves": 2, "verbose": -1, "num_threads": 1},
+            ds,
+            num_boost_round=1,
+        )
+        _lightgbm_cuda_cache = True
+        return True
+    except Exception:
+        _lightgbm_cuda_cache = False
+        return False
+
+
+def get_lightgbm_device(device_str: str = "auto") -> str:
+    """
+    获取 LightGBM 可用的设备参数。
+
+    与 _is_cuda_available() 不同，本函数会实际测试 LightGBM 是否编译了 CUDA 支持，
+    因为 PyTorch 有 CUDA ≠ LightGBM 编译了 CUDA。
+
+    Returns:
+        'cuda', 'cpu'（MPS 不支持 LightGBM）
+    """
+    normalized = device_str.strip().lower()
+    if normalized in ("cuda", "gpu"):
+        if _is_lightgbm_cuda_available():
+            return "cuda"
+        print("⚠ LightGBM CUDA 不可用，回退到 CPU")
+        return "cpu"
+    if normalized in ("auto",):
+        if _is_lightgbm_cuda_available():
+            return "cuda"
+        return "cpu"
+    return "cpu"
 
 
 def gardner_knopoff_windows() -> dict[tuple[float, float], tuple[float, float]]:

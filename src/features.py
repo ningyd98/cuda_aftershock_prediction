@@ -237,6 +237,7 @@ def fit_omori_utsu(
         x0=np.array([initial_p, np.log(initial_c)], dtype=float),
         bounds=[(p_min, p_max), (np.log(c_min), np.log(c_max))],
         method="L-BFGS-B",
+        options={"maxiter": 50, "ftol": 1e-8},
     )
 
     if not result.success:
@@ -398,6 +399,8 @@ def estimate_etas_parameters(
     max_events: int = 500,
     mc: float = 2.5,
     bin_width: float = 0.1,
+    precomputed_gr: dict | None = None,
+    precomputed_omori: dict | None = None,
 ) -> dict:
     """
     简化 ETAS (Epidemic Type Aftershock Sequence) 模型参数估计 (优化版)。
@@ -405,6 +408,9 @@ def estimate_etas_parameters(
     对于超过 max_events 的序列做随机下采样以控制拟合时间。
     mainshock_mag 参数接收真实主震震级；若未传入则回退到早期余震
     最大震级（保持向后兼容）。
+
+    precomputed_gr / precomputed_omori: 可传入外部已计算的 G-R/大森结果，
+    避免在 ETAS 内部重复拟合（性能优化）。
     """
     if events.empty or time_col not in events.columns:
         return _empty_etas_result(0)
@@ -427,24 +433,22 @@ def estimate_etas_parameters(
         elapsed_days = elapsed_days[keep_idx]
         n_events = max_events
 
-    mags = events[mag_col].dropna().astype(float).to_numpy()
-    mags_in_window = mags[np.isfinite(mags)]
-    mags_in_window = mags_in_window[
-        (pd.to_datetime(events[time_col], utc=True, errors="coerce") > mainshock_time)
-        & (pd.to_datetime(events[time_col], utc=True, errors="coerce") <= mainshock_time + pd.Timedelta(days=obs_days))
-    ]
+    mags_in_window = events[mag_col].dropna().astype(float).to_numpy()
 
     if len(mags_in_window) < min_events:
         return _empty_etas_result(n_events)
 
-    # Step 1: 估计 b 值
-    gr_result = estimate_gr_b_value(
-        events[events[time_col].notna()].assign(mag=mags),
-        mag_col="mag",
-        mc=mc,
-        bin_width=bin_width,
-        min_events=min_events,
-    )
+    # Step 1: 估计 b 值 (优先使用预计算结果)
+    if precomputed_gr is not None and precomputed_gr.get("gr_valid"):
+        gr_result = precomputed_gr
+    else:
+        gr_result = estimate_gr_b_value(
+            events[events[time_col].notna()].assign(mag=events[mag_col]),
+            mag_col="mag",
+            mc=mc,
+            bin_width=bin_width,
+            min_events=min_events,
+        )
     if not gr_result["gr_valid"]:
         return _empty_etas_result(n_events)
 
@@ -452,24 +456,23 @@ def estimate_etas_parameters(
     beta = b_value * np.log(10)
 
     # Step 2: 简化 ETAS — 固定 Omori 参数，仅估计 μ, K0, α
-    # 强度函数: λ(t,m) = μ + Σ K0 * exp(α*(Mi-Mc)) / (t-ti + c)^p
-    # 简化为仅用主震贡献: λ(t) ≈ μ + K0 * exp(α*(M0-Mc)) / (t + c)^p
-
     # 优先使用显式传入的真实主震震级，回退到早期余震最大震级
     if mainshock_mag is not None and np.isfinite(mainshock_mag):
         _mainshock_mag = float(mainshock_mag)
     else:
         _mainshock_mag = float(mags_in_window.max()) if len(mags_in_window) > 0 else mc + 1.0
-    mag_factor = np.exp(beta * (_mainshock_mag - mc))
 
-    # 先拟合大森定律获取 p, c
-    omori_result = fit_omori_utsu(
-        events,
-        mainshock_time=mainshock_time,
-        time_col=time_col,
-        obs_days=obs_days,
-        min_events=min_events,
-    )
+    # 优先使用预计算的大森定律结果
+    if precomputed_omori is not None and precomputed_omori.get("omori_valid"):
+        omori_result = precomputed_omori
+    else:
+        omori_result = fit_omori_utsu(
+            events,
+            mainshock_time=mainshock_time,
+            time_col=time_col,
+            obs_days=obs_days,
+            min_events=min_events,
+        )
     p_hat = omori_result.get("omori_p", 1.0) if omori_result["omori_valid"] else 1.0
     c_hat = omori_result.get("omori_c", 0.05) if omori_result["omori_valid"] else 0.05
 

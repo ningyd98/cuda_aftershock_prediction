@@ -97,3 +97,66 @@ transformer:
   # --- Early Stopping ---
   early_stopping_patience: 10
   early_stopping_min_delta: 0.001
+
+  # --- CUDA / 性能 ---
+  device: auto               # auto / cuda / cpu
+  num_workers: 0             # DataLoader workers (0=主进程, >0=多进程预加载)
+  pin_memory: true           # pin_memory 加速 CPU→GPU 数据传输
+  use_torch_compile: false   # torch.compile (PyTorch >= 2.0)
+
+# ============================================================
+#  ST-GNN 图神经网络模型配置
+# ============================================================
+gnn:
+  # --- 序列构建 ---
+  obs_days: 3.0
+  spatial_radius_km: 100.0
+  earth_radius_km: 6371.0
+  max_seq_len: 256
+
+  # --- 模型架构 ---
+  node_hidden_dim: 64
+  num_gnn_layers: 3
+  gnn_sigma: 50.0
+  gnn_radius_km: 100.0
+  gru_hidden_dim: 64
+  gru_layers: 2
+  global_hidden_dim: 128
+  fusion_hidden_dim: 128
+  dropout: 0.1
+
+  # --- 训练超参 ---
+  epochs: 50
+  batch_size: 16
+  lr: 0.001
+  weight_decay: 0.0001
+  late_weight: 2.0
+
+  # --- 预处理器 ---
+  scaler_type: robust
+  add_missing_indicators: true
+
+  # --- OOF 验证 ---
+  n_splits: 5
+  purge_days: 30.0
+
+  # --- CUDA / 性能 ---
+  device: auto
+  num_workers: 0
+  pin_memory: true
+  use_torch_compile: false
+
+# ============================================================
+#  LightGBM 树模型配置
+# ============================================================
+lightgbm:
+  device: auto               # auto / cuda / cpu
+  gpu_use_dp: false          # GPU 双精度模式
+
+# ============================================================
+#  全局 CUDA 设置
+# ============================================================
+cuda:
+  deterministic: false       # 可复现模式（会降低性能）
+  allow_tf32: true           # TF32 加速 (Ampere+ GPU)
+  matmul_precision: high     # 'highest' / 'high' / 'medium'
