@@ -59,7 +59,7 @@ from src.features import (
     fit_omori_utsu,
     load_plate_boundaries,
 )
-from src.utils import haversine_km, seismic_moment_from_mw
+from src.utils import haversine_km, seismic_moment_from_mw, get_torch_device
 
 TARGET_COLS = ["target_max_mag", "target_time_to_max_days"]
 TIME_COL = "mainshock_time"
@@ -70,7 +70,7 @@ def resolve_project_path(path_value: str | Path) -> Path:
     return path if path.is_absolute() else PROJECT_ROOT / path
 
 
-def load_model_and_meta(model_dir: Path, device: str = "cpu"):
+def load_model_and_meta(model_dir: Path, device_str: str = "auto"):
     """加载 Transformer 模型及其元信息。"""
     model_path = model_dir / "dl_model.pt"
     meta_path = model_dir / "dl_meta.json"
@@ -87,6 +87,8 @@ def load_model_and_meta(model_dir: Path, device: str = "cpu"):
     import joblib
     preprocessors = joblib.load(preprocessor_path) if preprocessor_path.exists() else None
 
+    _dev = get_torch_device(device_str)
+
     model = Seq2SeqAftershockPredictor(
         event_feature_dim=meta["event_feature_dim"],
         global_feature_dim=meta["global_feature_dim"],
@@ -95,9 +97,9 @@ def load_model_and_meta(model_dir: Path, device: str = "cpu"):
         num_layers=meta.get("num_layers", 3),
     )
     model.load_state_dict(
-        torch.load(model_path, map_location=device, weights_only=True)
+        torch.load(model_path, map_location=_dev, weights_only=True)
     )
-    model.to(device)
+    model.to(_dev)
     model.eval()
 
     return model, meta, preprocessors
@@ -285,7 +287,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", type=Path, default=None, help="单条测试序列 CSV")
     parser.add_argument("--input-dir", type=Path, default=None, help="批量测试序列目录")
     parser.add_argument("--output-dir", type=Path, default=None, help="分析结果输出目录")
-    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--device", type=str, default="auto",
+                        help="设备: auto, cuda, mps, cpu")
     parser.add_argument("--compare-tree", action="store_true", help="与树模型对比")
     parser.add_argument("--extract-attention", action="store_true", help="提取注意力权重")
     parser.add_argument("--event-contributions", action="store_true", help="计算事件贡献度")
@@ -297,7 +300,7 @@ def analyze_single_sequence(
     model,
     meta: dict,
     preprocessors,
-    device: str,
+    device_str: str,
     event_df: pd.DataFrame,
     plate_boundaries_path: Path,
     args: argparse.Namespace,
@@ -327,10 +330,11 @@ def analyze_single_sequence(
         return {"error": f"Dataset 构建失败: {exc}", "mainshock_id": mainshock_id}
 
     # 预测
+    _dev = get_torch_device(device_str)
     with torch.no_grad():
-        seq_x = batch["seq_x"].to(device)
-        global_x = batch["global_x"].to(device)
-        mask = batch["seq_padding_mask"].to(device)
+        seq_x = batch["seq_x"].to(_dev)
+        global_x = batch["global_x"].to(_dev)
+        mask = batch["seq_padding_mask"].to(_dev)
         preds = model(seq_x, global_x, mask)[0].cpu().numpy()
         # log1p → days
         preds[1] = np.expm1(np.clip(preds[1], 0.0, 50.0))
@@ -365,11 +369,12 @@ def analyze_single_sequence(
 
 def main() -> None:
     args = parse_args()
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    _dev = get_torch_device(args.device)
+    print(f"设备: {_dev}")
 
     # 加载模型
     model_dir = resolve_project_path(args.model_dir)
-    model, meta, preprocessors = load_model_and_meta(model_dir, device)
+    model, meta, preprocessors = load_model_and_meta(model_dir, args.device)
     print(f"已加载 Transformer 模型: {model_dir / 'dl_model.pt'}")
     print(f"  d_model={meta.get('d_model')}, nhead={meta.get('nhead')}, "
           f"num_layers={meta.get('num_layers')}")
@@ -395,7 +400,7 @@ def main() -> None:
         input_path = resolve_project_path(args.input)
         print(f"\n分析序列: {input_path.name}")
         result = analyze_single_sequence(
-            input_path, model, meta, preprocessors, device,
+            input_path, model, meta, preprocessors, args.device,
             event_df, plate_boundaries_path, args,
         )
 
@@ -422,7 +427,7 @@ def main() -> None:
         all_results = []
         for csv_path in csv_files:
             result = analyze_single_sequence(
-                csv_path, model, meta, preprocessors, device,
+                csv_path, model, meta, preprocessors, args.device,
                 event_df, plate_boundaries_path, args,
             )
             all_results.append(result)

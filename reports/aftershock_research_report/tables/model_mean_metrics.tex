@@ -1,8 +1,12 @@
-\begin{tabular}{lrrrrrr}
+\begingroup
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{p{0.16\textwidth}rrrrrr}
 \toprule
 模型 & Mag RMSE & Mag MAE & Time RMSE & Time MAE & Asym MAE & Asym RMSE \\
 \midrule
-baseline & 1.381 & 0.590 & 2.469 & 0.657 & 0.896 & 2.556 \\
-xgboost & 1.382 & 0.585 & 2.454 & 0.574 & 0.722 & 2.495 \\
+baseline & 0.531 & 0.425 & 8.354 & 6.729 & 9.235 & 9.374 \\
+xgboost & 0.524 & 0.421 & 8.572 & 6.716 & 8.515 & 9.167 \\
 \bottomrule
 \end{tabular}
+\endgroup

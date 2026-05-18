@@ -98,10 +98,15 @@ class BaselineLGBM:
     def __init__(
         self,
         random_state: int = 42,
-        n_estimators: int = 300,
-        learning_rate: float = 0.03,
-        num_leaves: int = 31,
+        n_estimators: int = 500,
+        learning_rate: float = 0.02,
+        num_leaves: int = 63,
         max_depth: int = -1,
+        min_child_samples: int = 20,
+        subsample: float = 0.8,
+        colsample_bytree: float = 0.7,
+        reg_alpha: float = 0.05,
+        reg_lambda: float = 1.0,
         n_jobs: int = -1,
         use_asymmetric_time_objective: bool = False,
         late_weight: float = 2.0,
@@ -113,6 +118,11 @@ class BaselineLGBM:
         self.learning_rate = learning_rate
         self.num_leaves = num_leaves
         self.max_depth = max_depth
+        self.min_child_samples = min_child_samples
+        self.subsample = subsample
+        self.colsample_bytree = colsample_bytree
+        self.reg_alpha = reg_alpha
+        self.reg_lambda = reg_lambda
         self.n_jobs = n_jobs
         self.use_asymmetric_time_objective = use_asymmetric_time_objective
         self.late_weight = late_weight
@@ -126,45 +136,40 @@ class BaselineLGBM:
         try:
             from lightgbm import LGBMRegressor
 
+            common_lgbm_params = {
+                "n_estimators": self.n_estimators,
+                "learning_rate": self.learning_rate,
+                "num_leaves": self.num_leaves,
+                "max_depth": self.max_depth,
+                "min_child_samples": self.min_child_samples,
+                "subsample": self.subsample,
+                "colsample_bytree": self.colsample_bytree,
+                "reg_alpha": self.reg_alpha,
+                "reg_lambda": self.reg_lambda,
+                "random_state": self.random_state,
+                "n_jobs": self.n_jobs,
+                "verbosity": -1,
+                **self.model_kwargs,
+            }
+
             if self.use_asymmetric_time_objective:
                 self.backend = "lightgbm_asymmetric_time"
                 self.mag_model = LGBMRegressor(
                     objective="regression",
-                    n_estimators=self.n_estimators,
-                    learning_rate=self.learning_rate,
-                    num_leaves=self.num_leaves,
-                    max_depth=self.max_depth,
-                    random_state=self.random_state,
-                    n_jobs=self.n_jobs,
-                    verbosity=-1,
-                    **self.model_kwargs,
+                    **common_lgbm_params,
                 )
                 self.time_model = LGBMRegressor(
                     objective=AsymmetricTimeObjective(
                         late_weight=self.late_weight,
                         log_space=self.transform_time_target,
                     ),
-                    n_estimators=self.n_estimators,
-                    learning_rate=self.learning_rate,
-                    num_leaves=self.num_leaves,
-                    max_depth=self.max_depth,
-                    random_state=self.random_state,
-                    n_jobs=self.n_jobs,
-                    verbosity=-1,
-                    **self.model_kwargs,
+                    **common_lgbm_params,
                 )
                 return None
 
             base_model = LGBMRegressor(
                 objective="regression",
-                n_estimators=self.n_estimators,
-                learning_rate=self.learning_rate,
-                num_leaves=self.num_leaves,
-                max_depth=self.max_depth,
-                random_state=self.random_state,
-                n_jobs=self.n_jobs,
-                verbosity=-1,
-                **self.model_kwargs,
+                **common_lgbm_params,
             )
         except ImportError:
             self.backend = "sklearn_hist_gradient_boosting"
@@ -224,13 +229,15 @@ class BaselineXGBoost:
     def __init__(
         self,
         random_state: int = 42,
-        n_estimators: int = 300,
-        learning_rate: float = 0.03,
-        max_depth: int = 6,
+        n_estimators: int = 500,
+        learning_rate: float = 0.02,
+        max_depth: int = 7,
         subsample: float = 0.8,
-        colsample_bytree: float = 0.8,
-        reg_alpha: float = 0.1,
-        reg_lambda: float = 1.0,
+        colsample_bytree: float = 0.7,
+        reg_alpha: float = 0.05,
+        reg_lambda: float = 1.5,
+        min_child_weight: int = 5,
+        gamma: float = 0.1,
         n_jobs: int = -1,
         transform_time_target: bool = True,
         **model_kwargs,
@@ -243,6 +250,8 @@ class BaselineXGBoost:
         self.colsample_bytree = colsample_bytree
         self.reg_alpha = reg_alpha
         self.reg_lambda = reg_lambda
+        self.min_child_weight = min_child_weight
+        self.gamma = gamma
         self.n_jobs = n_jobs
         self.transform_time_target = transform_time_target
         self.model_kwargs = model_kwargs
@@ -263,9 +272,12 @@ class BaselineXGBoost:
                 colsample_bytree=self.colsample_bytree,
                 reg_alpha=self.reg_alpha,
                 reg_lambda=self.reg_lambda,
+                min_child_weight=self.min_child_weight,
+                gamma=self.gamma,
                 random_state=self.random_state,
                 n_jobs=self.n_jobs,
                 verbosity=0,
+                tree_method="hist",
                 **self.model_kwargs,
             )
         except ImportError:

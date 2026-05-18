@@ -33,6 +33,22 @@ FEATURE_PREFIXES = (
     "bath_",
     "fault_type_",
     "productivity_",
+    "mag_ratio_",
+    "mag_diff_",
+    "energy_per_",
+    "log_energy_",
+    "count_ratio_",
+    "energy_ratio_",
+    "omori_p_",
+    "omori_decay_",
+    "etas_p_",
+    "aniso_",
+    "plate_dist_",
+    "log_plate_",
+    "b_value_",
+    "log_depth",
+    "depth_mag_",
+    "productivity_per_",
 )
 EXPLICIT_FEATURES = {
     "mainshock_mag",
@@ -91,6 +107,65 @@ def select_feature_columns(df: pd.DataFrame) -> list[str]:
         if pd.api.types.is_numeric_dtype(df[col]):
             numeric_cols.append(col)
     return numeric_cols
+
+
+def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
+    """添加交互特征和衍生特征以提升预测性能。"""
+    df = df.copy()
+
+    # 震级差异比率特征
+    if "mainshock_mag" in df.columns and "early_max_mag" in df.columns:
+        df["mag_ratio_early_main"] = df["early_max_mag"] / df["mainshock_mag"].clip(lower=1.0)
+        df["mag_diff_main_early"] = df["mainshock_mag"] - df["early_max_mag"]
+
+    # 能量释放速率
+    if "early_energy_sum" in df.columns and "early_aftershock_count" in df.columns:
+        df["energy_per_event"] = df["early_energy_sum"] / df["early_aftershock_count"].clip(lower=1)
+        df["log_energy_sum"] = np.log1p(df["early_energy_sum"])
+
+    # 时间衰减特征 (早期 vs 晚期活动比)
+    if "count_1h" in df.columns and "count_72h" in df.columns:
+        df["count_ratio_1h_72h"] = df["count_1h"] / df["count_72h"].clip(lower=1)
+        df["count_ratio_6h_72h"] = df.get("count_6h", 0) / df["count_72h"].clip(lower=1)
+        df["count_ratio_24h_72h"] = df.get("count_24h", 0) / df["count_72h"].clip(lower=1)
+
+    if "energy_1h" in df.columns and "energy_72h" in df.columns:
+        df["energy_ratio_1h_72h"] = df["energy_1h"] / df["energy_72h"].clip(lower=1e-10)
+        df["energy_ratio_24h_72h"] = df.get("energy_24h", 0) / df["energy_72h"].clip(lower=1e-10)
+
+    # Omori-Utsu 参数交互
+    if "omori_p" in df.columns and "omori_c" in df.columns:
+        df["omori_p_times_c"] = df["omori_p"] * df["omori_c"]
+        df["omori_decay_rate"] = df["omori_p"] / df["omori_c"].clip(lower=1e-6)
+
+    # ETAS 参数交互
+    if "etas_p" in df.columns and "etas_alpha" in df.columns:
+        df["etas_p_alpha_ratio"] = df["etas_p"] / df["etas_alpha"].clip(lower=1e-6)
+
+    # 空间各向异性与震级交互
+    if "anisotropy_major_axis_km" in df.columns and "mainshock_mag" in df.columns:
+        df["aniso_area_proxy"] = df["anisotropy_major_axis_km"] * df.get("anisotropy_minor_axis_km", 0)
+        df["aniso_per_mag"] = df["anisotropy_major_axis_km"] / df["mainshock_mag"].clip(lower=1.0)
+
+    # 板块边界距离与震级交互
+    if "plate_boundary_distance_km" in df.columns and "mainshock_mag" in df.columns:
+        df["plate_dist_per_mag"] = df["plate_boundary_distance_km"] / df["mainshock_mag"].clip(lower=1.0)
+        df["log_plate_dist"] = np.log1p(df["plate_boundary_distance_km"])
+
+    # b值与震级交互
+    if "gr_b_value" in df.columns and "mainshock_mag" in df.columns:
+        df["b_value_times_mag"] = df["gr_b_value"] * df["mainshock_mag"]
+
+    # 深度特征
+    if "mainshock_depth" in df.columns:
+        df["log_depth"] = np.log1p(df["mainshock_depth"].clip(lower=0))
+        df["depth_mag_ratio"] = df["mainshock_depth"] / df["mainshock_mag"].clip(lower=1.0)
+
+    # 生产力指数与早期事件数交互
+    if "productivity_index" in df.columns and "early_aftershock_count" in df.columns:
+        df["productivity_per_event"] = df["productivity_index"] / df["early_aftershock_count"].clip(lower=1)
+
+    return df
 
 
 def prepare_training_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -289,7 +364,7 @@ def search_tree_ensemble_weights(
     late_weight: float,
     grid_step: float,
 ) -> tuple[dict[str, float], dict]:
-    """基于 OOF 预测搜索树模型融合权重。"""
+    """基于 OOF 预测搜索树模型融合权重（双目标独立搜索）。"""
     weights = {"baseline": 0.0, "xgboost": 0.0, "dl": 0.0, "gnn": 0.0}
     active_names = [name for name in model_names if name in {"baseline", "xgboost"}]
     if len(active_names) == 1:
@@ -320,27 +395,50 @@ def search_tree_ensemble_weights(
     xgb_time = oof_df.loc[mask, "xgboost_pred_time"].to_numpy()
 
     grid = np.arange(0.0, 1.0 + grid_step / 2.0, grid_step)
-    best_metrics: dict | None = None
-    best_weight = 1.0
+
+    # 独立搜索震级最优权重
+    best_mag_rmse = float("inf")
+    best_mag_weight = 0.5
     for baseline_weight in grid:
         xgb_weight = 1.0 - baseline_weight
         pred_mag = baseline_weight * baseline_mag + xgb_weight * xgb_mag
-        pred_time = baseline_weight * baseline_time + xgb_weight * xgb_time
-        metrics = calculate_metrics(
-            y_true_mag=y_mag,
-            y_pred_mag=pred_mag,
-            y_true_time=y_time,
-            y_pred_time=pred_time,
-            late_weight=late_weight,
-        )
-        objective = metrics["mag_rmse"] + metrics["time_asymmetric_rmse"]
-        metrics["ensemble_objective"] = float(objective)
-        if best_metrics is None or objective < best_metrics["ensemble_objective"]:
-            best_metrics = metrics
-            best_weight = float(baseline_weight)
+        mag_rmse = float(np.sqrt(np.mean((pred_mag - y_mag) ** 2)))
+        if mag_rmse < best_mag_rmse:
+            best_mag_rmse = mag_rmse
+            best_mag_weight = float(baseline_weight)
 
-    weights["baseline"] = round(best_weight, 4)
-    weights["xgboost"] = round(1.0 - best_weight, 4)
+    # 独立搜索时间最优权重
+    best_time_obj = float("inf")
+    best_time_weight = 0.5
+    for baseline_weight in grid:
+        xgb_weight = 1.0 - baseline_weight
+        pred_time = baseline_weight * baseline_time + xgb_weight * xgb_time
+        time_error = pred_time - y_time
+        abs_time_error = np.abs(time_error)
+        time_weights = np.where(time_error > 0, late_weight, 1.0)
+        time_asym_rmse = float(np.sqrt(np.mean(time_weights * time_error**2)))
+        if time_asym_rmse < best_time_obj:
+            best_time_obj = time_asym_rmse
+            best_time_weight = float(baseline_weight)
+
+    # 使用各自最优权重计算最终融合指标
+    final_pred_mag = best_mag_weight * baseline_mag + (1.0 - best_mag_weight) * xgb_mag
+    final_pred_time = best_time_weight * baseline_time + (1.0 - best_time_weight) * xgb_time
+    best_metrics = calculate_metrics(
+        y_true_mag=y_mag,
+        y_pred_mag=final_pred_mag,
+        y_true_time=y_time,
+        y_pred_time=final_pred_time,
+        late_weight=late_weight,
+    )
+    best_metrics["ensemble_objective"] = float(best_metrics["mag_rmse"] + best_metrics["time_asymmetric_rmse"])
+
+    # 保存为双目标独立权重格式（兼容 make_submission 的新格式）
+    weights["baseline"] = round(best_mag_weight, 4)
+    weights["xgboost"] = round(1.0 - best_mag_weight, 4)
+    # 额外保存双目标权重信息
+    weights["_mag_baseline_w"] = round(best_mag_weight, 4)
+    weights["_time_baseline_w"] = round(best_time_weight, 4)
     return weights, best_metrics or {"ensemble_objective": float("nan")}
 
 
@@ -378,8 +476,26 @@ def save_training_artifacts(
     save_dir.mkdir(parents=True, exist_ok=True)
     with (save_dir / "feature_cols.json").open("w", encoding="utf-8") as file:
         json.dump(feature_cols, file, ensure_ascii=False, indent=2)
+
+    # 转换为双目标独立权重格式 (make_submission.py 支持)
+    mag_baseline_w = ensemble_weights.get("_mag_baseline_w", ensemble_weights.get("baseline", 0.5))
+    time_baseline_w = ensemble_weights.get("_time_baseline_w", ensemble_weights.get("baseline", 0.5))
+    dual_weights = {
+        "mag": {
+            "baseline": round(float(mag_baseline_w), 4),
+            "xgboost": round(1.0 - float(mag_baseline_w), 4),
+            "dl": float(ensemble_weights.get("dl", 0.0)),
+            "gnn": float(ensemble_weights.get("gnn", 0.0)),
+        },
+        "time": {
+            "baseline": round(float(time_baseline_w), 4),
+            "xgboost": round(1.0 - float(time_baseline_w), 4),
+            "dl": float(ensemble_weights.get("dl", 0.0)),
+            "gnn": float(ensemble_weights.get("gnn", 0.0)),
+        },
+    }
     with (save_dir / "ensemble_weights.json").open("w", encoding="utf-8") as file:
-        json.dump(ensemble_weights, file, ensure_ascii=False, indent=2)
+        json.dump(dual_weights, file, ensure_ascii=False, indent=2)
 
     fold_metrics_df.to_csv(save_dir / "cv_metrics.csv", index=False, encoding="utf-8")
     oof_df.to_csv(save_dir / "oof_predictions.csv", index=False, encoding="utf-8")
@@ -415,6 +531,7 @@ def main() -> None:
 
     data_path = resolve_project_path(args.data)
     df = prepare_training_frame(pd.read_csv(data_path))
+    df = add_derived_features(df)
     feature_cols = select_feature_columns(df)
     model_names = requested_model_names(args.model_type)
 

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from __future__ import annotations
-
 """
 多模型 OOF 融合权重搜索。
 
@@ -109,79 +107,77 @@ def search_weights_for_target(
     merged: pd.DataFrame,
     models: list[str],
     target_idx: int,
-    objective: str,
     late_weight: float,
     grid_step: float,
 ) -> tuple[dict[str, float], float]:
     """
-    为单个目标搜索融合权重。
+    完整 simplex 网格搜索，支持 1/2/3/4 个可用模型。
 
-    target_idx: 0 = mag, 1 = time
-    objective: "mag_rmse" 或 "time_asymmetric_rmse"
+    target_idx: 0 = mag (最小化 mag_rmse), 1 = time (最小化 time_asymmetric_rmse)
+    单模型时也真实计算 objective，不返回 0。
     """
-    n_models = len(models)
-    if n_models == 1:
-        return {models[0]: 1.0}, 0.0
-
-    # 构建预测矩阵: (N, n_models)
     pred_cols = [MODEL_PRED_COLS[m][target_idx] for m in models]
     pred_matrix = merged[pred_cols].to_numpy(dtype=float)
     y_true = merged[TARGET_COLS[target_idx]].to_numpy(dtype=float)
+    n_models = len(models)
 
-    # 权重网格：n_models 维单纯形
-    # 先搜索 2 模型组合（baseline+xgboost），然后固定到多模型归一化
-    best_objective = float("inf")
-    best_weights = {m: 1.0 / n_models for m in models}
+    def _compute_objective(wvec: np.ndarray) -> float:
+        pred = pred_matrix @ wvec
+        if target_idx == 0:
+            return float(np.sqrt(np.mean((pred - y_true) ** 2)))
+        time_err = pred - y_true
+        time_w = np.where(time_err > 0, late_weight, 1.0)
+        return float(np.sqrt(np.mean(time_w * time_err ** 2)))
 
+    # 单模型：真实计算 objective
+    if n_models == 1:
+        obj = _compute_objective(np.array([1.0]))
+        return {models[0]: 1.0}, obj
+
+    # 2 模型：完整 1D 网格 (w, 1-w)
     if n_models == 2:
+        best_objective = float("inf")
+        best_weights = {models[0]: 0.5, models[1]: 0.5}
         grid = np.arange(0.0, 1.0 + grid_step / 2.0, grid_step)
         for w in grid:
             wvec = np.array([w, 1.0 - w])
-            pred = pred_matrix @ wvec
-            if target_idx == 0:
-                val = float(np.sqrt(np.mean((pred - y_true) ** 2)))
-            else:
-                time_err = pred - y_true
-                time_w = np.where(time_err > 0, late_weight, 1.0)
-                val = float(np.sqrt(np.mean(time_w * time_err ** 2)))
-            if val < best_objective:
-                best_objective = val
+            obj = _compute_objective(wvec)
+            if obj < best_objective:
+                best_objective = obj
                 best_weights = {models[0]: round(float(w), 4), models[1]: round(float(1 - w), 4)}
-    else:
-        # 多模型：仅均匀 + 两两组合搜索后归一化
-        # 基准: 均匀
-        wvec = np.ones(n_models) / n_models
-        pred = pred_matrix @ wvec
-        if target_idx == 0:
-            best_objective = float(np.sqrt(np.mean((pred - y_true) ** 2)))
-        else:
-            time_err = pred - y_true
-            time_w = np.where(time_err > 0, late_weight, 1.0)
-            best_objective = float(np.sqrt(np.mean(time_w * time_err ** 2)))
+        total = sum(best_weights.values())
+        best_weights = {k: round(v / total, 4) for k, v in best_weights.items()}
+        return best_weights, float(best_objective)
 
-        # 贪心：逐个增加/减少权重
-        base_vals = np.ones(n_models) / n_models
-        grid = np.arange(0.0, 1.0 + grid_step, grid_step)
-        for i in range(n_models):
-            for w in grid:
-                trial = base_vals.copy()
-                trial[i] = w
-                trial = trial / trial.sum()
-                pred = pred_matrix @ trial
-                if target_idx == 0:
-                    val = float(np.sqrt(np.mean((pred - y_true) ** 2)))
-                else:
-                    time_err = pred - y_true
-                    time_w = np.where(time_err > 0, late_weight, 1.0)
-                    val = float(np.sqrt(np.mean(time_w * time_err ** 2)))
-                if val < best_objective:
-                    best_objective = val
-                    best_weights = {models[j]: round(float(trial[j]), 4) for j in range(n_models)}
+    # 3+ 模型：simplex 采样网格
+    # 生成所有和为 1 的 n 元组 (步长 grid_step)
+    best_objective = float("inf")
+    best_weights = {m: 1.0 / n_models for m in models}
 
-    # 归一化确保和为 1
+    def _gen_simplex(n: int, step: float):
+        """迭代生成 n 维单纯形上的网格点 (和为 1, 步长 step)。"""
+        n_pts = int(1.0 / step)
+        if n == 3:
+            for i in range(n_pts + 1):
+                for j in range(n_pts + 1 - i):
+                    k = n_pts - i - j
+                    yield np.array([i, j, k], dtype=float) / n_pts
+        elif n == 4:
+            for i in range(n_pts + 1):
+                for j in range(n_pts + 1 - i):
+                    for k in range(n_pts + 1 - i - j):
+                        l = n_pts - i - j - k
+                        yield np.array([i, j, k, l], dtype=float) / n_pts
+
+    for wvec in _gen_simplex(n_models, grid_step):
+        obj = _compute_objective(wvec)
+        if obj < best_objective:
+            best_objective = obj
+            best_weights = {models[i]: round(float(wvec[i]), 4) for i in range(n_models)}
+
     total = sum(best_weights.values())
     best_weights = {k: round(v / total, 4) for k, v in best_weights.items()}
-    return best_weights, best_objective
+    return best_weights, float(best_objective)
 
 
 def compute_ensemble_metrics(
@@ -246,7 +242,7 @@ def main() -> None:
     print("\n--- 震级权重搜索 (minimize mag_rmse) ---")
     mag_weights, mag_best = search_weights_for_target(
         merged, available, target_idx=0,
-        objective="mag_rmse", late_weight=args.late_weight, grid_step=args.grid_step,
+        late_weight=args.late_weight, grid_step=args.grid_step,
     )
     for m, w in mag_weights.items():
         print(f"  {m}: {w:.4f}")
@@ -256,7 +252,7 @@ def main() -> None:
     print("\n--- 时间权重搜索 (minimize time_asymmetric_rmse) ---")
     time_weights, time_best = search_weights_for_target(
         merged, available, target_idx=1,
-        objective="time_asymmetric_rmse", late_weight=args.late_weight, grid_step=args.grid_step,
+        late_weight=args.late_weight, grid_step=args.grid_step,
     )
     for m, w in time_weights.items():
         print(f"  {m}: {w:.4f}")

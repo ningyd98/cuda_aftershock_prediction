@@ -18,7 +18,25 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# 确保项目根目录在 Python 路径中
+export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
+
+# ---- 常量 ----
 CONDA_PREFIX="${SCRIPT_DIR}/.conda"
+M6_CATALOG="data/raw/USGS_Mw6.0_Depth70_1970-2023.csv"
+FULL_CATALOG_M40="data/raw/USGS_Mw4.0_Depth70_1970-2023.csv"
+FULL_CATALOG_M45="data/raw/USGS_Mw4.5_Depth70_1970-2023.csv"
+ADVANCED_FEATURES="data/processed/advanced_features.csv"
+MODEL_DIR="data/models"
+TEST_DIR="data/test_sequences"
+SUBMISSION_CSV="data/processed/submission.csv"
+
+# OOF 公共参数
+OOF_N_SPLITS=5
+OOF_PURGE_DAYS=30.0
+OOF_GRID_STEP=0.02
+OOF_DL_EPOCHS=30
+OOF_GNN_EPOCHS=30
 if [ -x "${CONDA_PREFIX}/bin/python" ]; then
     PYTHON="${CONDA_PREFIX}/bin/python"
 else
@@ -81,19 +99,12 @@ for arg in "$@"; do
         --no-install) NO_INSTALL=true ;;
         --install) FORCE_INSTALL=true ;;
         --train-oof-ensemble) TRAIN_OOF_ENSEMBLE=true ;;
+        --analyze-transformer) ;; # 已弃用，保留兼容
         train-only) TRAIN_ONLY=true ;;
         -h|--help) show_usage; exit 0 ;;
         *) error "未知参数: $arg" ;;
     esac
 done
-
-M6_CATALOG="data/raw/USGS_Mw6.0_Depth70_1970-2023.csv"
-FULL_CATALOG_M40="data/raw/USGS_Mw4.0_Depth70_1970-2023.csv"
-FULL_CATALOG_M45="data/raw/USGS_Mw4.5_Depth70_1970-2023.csv"
-ADVANCED_FEATURES="data/processed/advanced_features.csv"
-MODEL_DIR="data/models"
-TEST_DIR="data/test_sequences"
-SUBMISSION_CSV="data/processed/submission.csv"
 
 pick_full_catalog() {
     if [ -f "$FULL_CATALOG_M40" ]; then
@@ -103,6 +114,55 @@ pick_full_catalog() {
     else
         echo "$M6_CATALOG"
     fi
+}
+
+# ---- OOF 融合子流程 ----
+run_oof_pipeline() {
+    local dl_catalog
+    dl_catalog="$(pick_full_catalog)"
+
+    step "OOF-1. 树模型 OOF 交叉验证"
+    "${PYTHON}" scripts/train_baseline.py \
+        --data "$ADVANCED_FEATURES" \
+        --n-splits "$OOF_N_SPLITS" \
+        --purge-days "$OOF_PURGE_DAYS" \
+        --n-estimators 300 \
+        --learning-rate 0.03 \
+        --model-type both \
+        --save-dir "$MODEL_DIR"
+    info "树模型 OOF 完成 → ${MODEL_DIR}/oof_predictions.csv"
+
+    step "OOF-2. Transformer (DL) OOF 交叉验证"
+    "${PYTHON}" scripts/train_dl.py \
+        --features "$ADVANCED_FEATURES" \
+        --event-catalog "$dl_catalog" \
+        --epochs "$OOF_DL_EPOCHS" \
+        --batch-size 32 \
+        --save-dir "$MODEL_DIR" \
+        --device auto \
+        --oof --n-splits "$OOF_N_SPLITS" --purge-days "$OOF_PURGE_DAYS" \
+        --oof-output "$MODEL_DIR/dl_oof_predictions.csv"
+    info "DL OOF 完成 → ${MODEL_DIR}/dl_oof_predictions.csv"
+
+    step "OOF-3. ST-GNN OOF 交叉验证"
+    "${PYTHON}" scripts/train_gnn.py \
+        --features "$ADVANCED_FEATURES" \
+        --event-catalog "$dl_catalog" \
+        --epochs "$OOF_GNN_EPOCHS" \
+        --batch-size 16 \
+        --save-dir "$MODEL_DIR" \
+        --device auto \
+        --oof --n-splits "$OOF_N_SPLITS" --purge-days "$OOF_PURGE_DAYS" \
+        --oof-output "$MODEL_DIR/gnn_oof_predictions.csv"
+    info "GNN OOF 完成 → ${MODEL_DIR}/gnn_oof_predictions.csv"
+
+    step "OOF-4. 多模型融合权重搜索"
+    "${PYTHON}" scripts/train_ensemble.py \
+        --model-dir "$MODEL_DIR" \
+        --grid-step "$OOF_GRID_STEP"
+    info "融合权重已保存 → ${MODEL_DIR}/ensemble_weights.json"
+    info "融合指标已保存 → ${MODEL_DIR}/ensemble_metrics.json"
+    info "融合 OOF 预测 → ${MODEL_DIR}/ensemble_oof_predictions.csv"
 }
 
 step "0. 环境检查"
@@ -180,17 +240,67 @@ else
     info "train-only 模式：跳过序列构建与特征生成"
 fi
 
+# ============================================================
+#  OOF 融合模式：树模型 OOF → DL OOF → GNN OOF → 融合搜索
+# ============================================================
+if [ "$TRAIN_OOF_ENSEMBLE" = true ]; then
+    [ -f "$ADVANCED_FEATURES" ] || error "OOF 模式需要已存在高级特征: ${ADVANCED_FEATURES}"
+
+    run_oof_pipeline
+
+    # 跳过常规训练：OOF 流程已产出树模型文件 (baseline_model.joblib 等)
+    info "OOF 融合全流程完成 [OK]"
+    info ""
+    info "产物清单:"
+    info "  树 OOF:        ${MODEL_DIR}/oof_predictions.csv"
+    info "  DL OOF:        ${MODEL_DIR}/dl_oof_predictions.csv"
+    info "  GNN OOF:       ${MODEL_DIR}/gnn_oof_predictions.csv"
+    info "  融合权重:      ${MODEL_DIR}/ensemble_weights.json"
+    info "  融合指标:      ${MODEL_DIR}/ensemble_metrics.json"
+    info "  融合 OOF 预测: ${MODEL_DIR}/ensemble_oof_predictions.csv"
+
+    # 生成提交
+    step "6. 对测试序列生成余震预测"
+    SUBMISSION_DIR="data/processed/submissions"
+    mkdir -p "$SUBMISSION_DIR"
+    ALL_PREDS="${SUBMISSION_DIR}/all_predictions.csv"
+    > "$ALL_PREDS"
+    FIRST=true
+    for test_csv in "$TEST_DIR"/*_eq.csv; do
+        SEQ_NAME=$(basename "$test_csv" _eq.csv)
+        OUT_CSV="${SUBMISSION_DIR}/${SEQ_NAME}_pred.csv"
+        "${PYTHON}" scripts/make_submission.py \
+            --input "$test_csv" \
+            --output "$OUT_CSV" \
+            --model-dir "$MODEL_DIR" \
+            --allow-rule-fallback 2>/dev/null || true
+        if [ -f "$OUT_CSV" ]; then
+            if [ "$FIRST" = true ]; then cat "$OUT_CSV" >> "$ALL_PREDS"; FIRST=false
+            else tail -n +2 "$OUT_CSV" >> "$ALL_PREDS" 2>/dev/null || true; fi
+        fi
+    done
+    if [ -f "$ALL_PREDS" ] && [ "$(wc -l < "$ALL_PREDS")" -gt 1 ]; then
+        cp "$ALL_PREDS" "$SUBMISSION_CSV"
+        info "汇总预测已保存: ${SUBMISSION_CSV}"
+    fi
+    exit 0
+fi
+
+# ============================================================
+#  常规模式：树模型训练 → 可选 DL/GNN → 预测
+# ============================================================
 step "5. 训练 LightGBM + XGBoost 树模型"
 "${PYTHON}" scripts/train_baseline.py \
     --data "$ADVANCED_FEATURES" \
     --n-splits 5 \
-    --n-estimators 300 \
-    --learning-rate 0.03 \
+    --n-estimators 500 \
+    --learning-rate 0.02 \
     --model-type both \
     --use-asymmetric-time-objective \
     --save-dir "$MODEL_DIR"
 info "树模型训练完成 ✓"
 
+# ---- 常规 DL/GNN 训练 ----
 DL_CATALOG="$(pick_full_catalog)"
 if [ "$WITH_DL" = true ]; then
     step "5b. 训练 Transformer 深度模型"
@@ -200,7 +310,7 @@ if [ "$WITH_DL" = true ]; then
         --epochs 50 \
         --batch-size 32 \
         --save-dir "$MODEL_DIR" \
-        --device cpu
+        --device auto
     info "Transformer 训练完成 ✓"
 fi
 
@@ -212,54 +322,11 @@ if [ "$WITH_GNN" = true ]; then
         --epochs 50 \
         --batch-size 16 \
         --save-dir "$MODEL_DIR" \
-        --device cpu
+        --device auto
     info "ST-GNN 训练完成 ✓"
 fi
 
-# ---- OOF 融合模式 ----
-if [ "$TRAIN_OOF_ENSEMBLE" = true ]; then
-    step "5x. 全模型 OOF 交叉验证"
-
-    # 5x-a: 树模型 OOF (train_baseline.py 在 step 5 已输出 oof_predictions.csv)
-    if [ ! -f "$MODEL_DIR/oof_predictions.csv" ]; then
-        warn "树模型 OOF 文件缺失，请确保 step 5 已正确输出"
-    else
-        info "树模型 OOF 已就绪: ${MODEL_DIR}/oof_predictions.csv"
-    fi
-
-    # 5x-b: DL OOF
-    info "训练 DL OOF ..."
-    "${PYTHON}" scripts/train_dl.py \
-        --features "$ADVANCED_FEATURES" \
-        --event-catalog "$DL_CATALOG" \
-        --epochs 30 \
-        --batch-size 32 \
-        --save-dir "$MODEL_DIR" \
-        --device cpu \
-        --oof --n-splits 5 --purge-days 30 \
-        --oof-output "$MODEL_DIR/dl_oof_predictions.csv"
-
-    # 5x-c: GNN OOF
-    info "训练 GNN OOF ..."
-    "${PYTHON}" scripts/train_gnn.py \
-        --features "$ADVANCED_FEATURES" \
-        --event-catalog "$DL_CATALOG" \
-        --epochs 30 \
-        --batch-size 16 \
-        --save-dir "$MODEL_DIR" \
-        --device cpu \
-        --oof --n-splits 5 --purge-days 30 \
-        --oof-output "$MODEL_DIR/gnn_oof_predictions.csv"
-
-    # 5x-d: 融合权重搜索
-    step "5y. 多模型 OOF 融合权重搜索"
-    "${PYTHON}" scripts/train_ensemble.py \
-        --model-dir "$MODEL_DIR" \
-        --grid-step 0.02
-
-    info "OOF 融合完成 ✓"
-fi
-
+# ---- 常规模式：更新融合权重 ----
 step "5d. 更新可用模型融合权重"
 WITH_DL_ENV="$WITH_DL" WITH_GNN_ENV="$WITH_GNN" "${PYTHON}" - <<'PY'
 import json
@@ -355,12 +422,9 @@ if [ "$MOCK_EVAL" = true ]; then
 fi
 
 echo ""
-echo "╔══════════════════════════════════════════════════════════╗"
-echo "║              全流程执行完毕                             ║"
-echo "╠══════════════════════════════════════════════════════════╣"
-echo "║  序列样本:   data/processed/ML_Ready_Sequences.csv      ║"
-echo "║  高级特征:   data/processed/advanced_features.csv       ║"
-echo "║  模型目录:   data/models                                ║"
-echo "║  交叉验证:   data/models/cv_metrics.csv                 ║"
-echo "║  预测提交:   data/processed/submission.csv              ║"
-echo "╚══════════════════════════════════════════════════════════╝"
+echo "== 全流程执行完毕 =="
+echo "  序列样本:   data/processed/ML_Ready_Sequences.csv"
+echo "  高级特征:   data/processed/advanced_features.csv"
+echo "  模型目录:   data/models"
+echo "  交叉验证:   data/models/cv_metrics.csv"
+echo "  预测提交:   data/processed/submission.csv"

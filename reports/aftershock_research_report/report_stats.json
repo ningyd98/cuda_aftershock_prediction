@@ -1,18 +1,20 @@
 {
-  "n_samples": 4704,
-  "n_feature_columns": 82,
-  "n_model_features": 74,
-  "n_gcmt_valid": 4022,
-  "n_gr_valid": 1217,
+  "n_samples": 4711,
+  "n_feature_columns": 83,
+  "n_model_features": 94,
+  "n_gcmt_valid": 4028,
+  "n_gr_valid": 1218,
   "n_omori_valid": 503,
-  "n_anisotropy_valid": 1853,
+  "n_anisotropy_valid": 1854,
   "n_submission": 20,
   "submission_min_time": 0.0814087034931698,
   "submission_max_time": 18.34578081359531,
   "ensemble": {
-    "baseline": 0.32,
-    "xgboost": 0.68,
+    "baseline": 0.12,
+    "xgboost": 0.88,
     "dl": 0.0,
-    "gnn": 0.0
+    "gnn": 0.0,
+    "_mag_baseline_w": 0.12,
+    "_time_baseline_w": 0.28
   }
 }

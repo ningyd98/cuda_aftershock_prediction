@@ -1,4 +1,4 @@
-This is XeTeX, Version 3.141592653-2.6-0.999998 (TeX Live 2026) (preloaded format=xelatex 2026.3.21)  18 MAY 2026 14:46
+This is XeTeX, Version 3.141592653-2.6-0.999998 (TeX Live 2026) (preloaded format=xelatex 2026.3.21)  18 MAY 2026 16:21
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -1200,28 +1200,13 @@ File: figures/pipeline_flow.png Graphic file (type bmp)
  [2]
 第二章
 (./tables/data_sources.tex
-Missing character: There is no ≥ (U+2265) in font [lmroman12-regular]:mapping=t
-ex-text;!
-
-Overfull \hbox (56.23299pt too wide) in paragraph at lines 5--5
-[]|\TU/lmr/m/n/12 data/raw/USGS_Mw4.0_Depth70_1970-
- []
-
-Missing character: There is no ≥ (U+2265) in font [lmroman12-regular]:mapping=t
-ex-text;!
-
-Overfull \hbox (56.23299pt too wide) in paragraph at lines 6--6
-[]|\TU/lmr/m/n/12 data/raw/USGS_Mw6.0_Depth70_1970-
- []
-
-
-Overfull \hbox (21.85298pt too wide) in paragraph at lines 7--7
-[]|\TU/lmr/m/n/12 data/raw/PB2002_boundaries.json| 
- []
-
-
 Underfull \hbox (badness 10000) in paragraph at lines 8--8
-[]|\TU/lmr/m/n/12 data/raw/GlobalCMT_1976-
+[]|\TU/lmr/m/n/10 USGS_Mw4.0_Depth70_1970-
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 9--9
+[]|\TU/lmr/m/n/10 USGS_Mw6.0_Depth70_1970-
  []
 
 ) (./tables/dataset_summary.tex) [3
@@ -1240,27 +1225,7 @@ File: figures/early_aftershock_count_distribution.png Graphic file (type bmp)
 <figures/early_aftershock_count_distribution.png>
  [5] [6]
 第三章
-(./tables/feature_groups.tex
-Overfull \hbox (43.19086pt too wide) in paragraph at lines 6--6
-[]|\TU/lmr/m/n/12 gr_b_value/gr_a_value/gr_mc| 
- []
-
-
-Overfull \hbox (20.01886pt too wide) in paragraph at lines 7--7
-[]|\TU/lmr/m/n/12 omori_p/omori_c/omori_k| 
- []
-
-
-Overfull \hbox (45.13486pt too wide) in paragraph at lines 8--8
-[]|\TU/lmr/m/n/12 bath_deficit/productivity_index| 
- []
-
-
-Overfull \hbox (29.22287pt too wide) in paragraph at lines 11--11
-[]|\TU/lmr/m/n/12 strike/dip/rake/fault_type_*| 
- []
-
-) [7
+(./tables/feature_groups.tex) [7
 
 ]
 File: figures/bath_deficit_vs_target.png Graphic file (type bmp)
@@ -1274,17 +1239,18 @@ File: figures/fault_type_distribution.png Graphic file (type bmp)
 <figures/fault_type_distribution.png>
 File: figures/gcmt_match_quality.png Graphic file (type bmp)
 <figures/gcmt_match_quality.png>
- [9] (./tables/feature_validity.tex)
+ (./tables/feature_validity.tex) [9]
 File: figures/feature_validity_bar.png Graphic file (type bmp)
 <figures/feature_validity_bar.png>
- [10] [11]
+
+[10]
 第四章
-[12
+[11
 
 ]
 File: figures/stgnn_causal_graph.png Graphic file (type bmp)
 <figures/stgnn_causal_graph.png>
- [13]
+ [12]
 第五章
 (./tables/cv_fold_metrics.tex)
 
@@ -1292,25 +1258,24 @@ Package caption Warning: The option `hypcap=true' will be ignored for this
 (caption)                particular \caption on input line 377.
 See the caption package documentation for explanation.
 
-[14
+[13
 
-] [15]
+] [14]
 第六章
 (./tables/model_mean_metrics.tex)
-Overfull \hbox (46.08493pt too wide) in paragraph at lines 1--419
- [][] 
- []
-
 File: figures/cv_rmse_by_fold.png Graphic file (type bmp)
 <figures/cv_rmse_by_fold.png>
 File: figures/time_asymmetric_metrics.png Graphic file (type bmp)
 <figures/time_asymmetric_metrics.png>
-[16
+ (./tables/ensemble_summary.tex) [15
 
-] (./tables/ensemble_summary.tex)
+]
 File: figures/ensemble_weights.png Graphic file (type bmp)
 <figures/ensemble_weights.png>
- (./tables/submission_results.tex [17])
+
+(./tables/submission_results.tex
+ignored: Infinite glue shrinkage found in box being spli
+t [16])
 
 Package caption Warning: The option `hypcap=true' will be ignored for this
 (caption)                particular \caption on input line 460.
@@ -1318,21 +1283,18 @@ See the caption package documentation for explanation.
 
 File: figures/submission_prediction_distribution.png Graphic file (type bmp)
 <figures/submission_prediction_distribution.png>
-[18] [19]
+[17] [18]
 第七章
-(./tables/module_structure.tex
-Overfull \hbox (21.95087pt too wide) in paragraph at lines 13--13
-[]|\TU/lmr/m/n/12 scripts/make_submission.py| 
- []
-
-)
+(./tables/module_structure.tex)
 Package hyperref Info: bookmark level for unknown lstlisting defaults to 0 on i
 nput line 489.
- [20
+ [19
 
-] [21]
+] [20]
 第八章
-[22
+[21
+
+] [22
 
 ]
 附录 A
@@ -1345,15 +1307,15 @@ L3 programming layer <2022/08/05>
  ***********
 Package rerunfilecheck Info: File `aftershock_research_report.out' has not chan
 ged.
-(rerunfilecheck)             Checksum: 03C5665A522B0D2C3D4A2F72C61AC7C3;4451.
+(rerunfilecheck)             Checksum: A33D3AC0660BA6437EF6416FF6B8D5DB;4529.
  ) 
 Here is how much of TeX's memory you used:
- 20345 strings out of 468168
- 430956 string characters out of 5432815
- 1043668 words of memory out of 5000000
- 48727 multiletter control sequences out of 15000+600000
- 634736 words of font info for 107 fonts, out of 8000000 for 9000
+ 20391 strings out of 468168
+ 432705 string characters out of 5432815
+ 1059668 words of memory out of 5000000
+ 48764 multiletter control sequences out of 15000+600000
+ 636467 words of font info for 119 fonts, out of 8000000 for 9000
  1348 hyphenation exceptions out of 8191
- 93i,13n,114p,416b,1957s stack positions out of 10000i,1000n,20000p,200000b,200000s
+ 93i,13n,114p,416b,1202s stack positions out of 10000i,1000n,20000p,200000b,200000s
 
-Output written on aftershock_research_report.xdv (27 pages, 233664 bytes).
+Output written on aftershock_research_report.xdv (27 pages, 249056 bytes).

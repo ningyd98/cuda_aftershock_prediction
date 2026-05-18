@@ -24,7 +24,7 @@ from src.dataset import (
     fit_dataset_preprocessors,
 )
 from src.models_dl import Seq2SeqAftershockPredictor, asymmetric_time_mse_loss
-from src.utils import set_random_seed
+from src.utils import get_torch_device, set_random_seed
 
 
 TARGET_COLS = ["target_max_mag", "target_time_to_max_days"]
@@ -200,7 +200,7 @@ def _run_oof_for_dl(
     args: argparse.Namespace,
 ) -> pd.DataFrame:
     """TimeSeriesSplit OOF 预测并输出 oof_predictions.csv。"""
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    device = get_torch_device(args.device)
     train_df = df.sort_values(TIME_COL).reset_index(drop=True)
     splitter = TimeSeriesSplit(n_splits=args.n_splits)
     purge_delta = pd.Timedelta(days=float(getattr(args, "purge_days", 30.0)))
@@ -282,13 +282,19 @@ def _run_oof_for_dl(
                     yy = batch["y"].to(device)
                     mk = batch["seq_padding_mask"].to(device)
                     pp = model(sx, gx, mk)
-                    val_loss_total += asymmetric_time_mse_loss(pp, yy).item() * len(yy)
+                    val_loss_total += asymmetric_time_mse_loss(pp, yy, late_weight=args.late_weight).item() * len(yy)
                     val_count += len(yy)
             val_loss = val_loss_total / max(val_count, 1)
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
             scheduler.step()
+
+        if best_state is None:
+            raise RuntimeError(
+                f"OOF fold {fold_idx}: 训练 {args.epochs} 轮后 best_state 仍为 None，"
+                "请检查模型是否正常训练（loss 可能为 NaN/Inf）"
+            )
 
         model.load_state_dict(best_state)
         model.eval()
@@ -361,7 +367,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-layers", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save-dir", type=Path, default=PROJECT_ROOT / "data" / "models")
-    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--device", type=str, default="auto",
+                        help="设备: auto, cuda, mps, cpu")
     # OOF 模式参数
     parser.add_argument("--oof", action="store_true", help="OOF 交叉验证模式")
     parser.add_argument("--n-splits", type=int, default=5, help="OOF 折数")
@@ -375,6 +382,9 @@ def main() -> None:
     args = parse_args()
     set_random_seed(args.seed)
     torch.manual_seed(args.seed)
+
+    if args.epochs <= 0:
+        raise ValueError(f"epochs 必须 > 0, 当前: {args.epochs}")
 
     # ---- OOF 模式 ----
     if args.oof:
@@ -404,7 +414,7 @@ def main() -> None:
         return
 
     # ---- 常规训练模式 ----
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    device = get_torch_device(args.device)
     print(f"设备: {device}")
 
     # 加载数据

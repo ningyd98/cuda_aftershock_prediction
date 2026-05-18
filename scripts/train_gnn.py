@@ -24,7 +24,7 @@ from src.dataset import (
     fit_dataset_preprocessors,
 )
 from src.models_gnn import STGNNPredictor, stgnn_asymmetric_loss
-from src.utils import set_random_seed
+from src.utils import get_torch_device, set_random_seed
 
 TARGET_COLS = ["target_max_mag", "target_time_to_max_days"]
 TIME_COL = "mainshock_time"
@@ -149,14 +149,15 @@ def _run_oof_for_gnn(
     event_df: pd.DataFrame,
     global_cols: list[str],
     args: argparse.Namespace,
-) -> pd.DataFrame:
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    device = get_torch_device(args.device)
     train_df = df.sort_values(TIME_COL).reset_index(drop=True)
     splitter = TimeSeriesSplit(n_splits=args.n_splits)
     purge_delta = pd.Timedelta(days=float(getattr(args, "purge_days", 30.0)))
 
     seq_config = SequenceBuildConfig(obs_days=3.0, spatial_radius_km=100.0, max_seq_len=256)
     oof_preds = np.full((len(train_df), len(TARGET_COLS)), np.nan, dtype=float)
+    fold_records: list[dict] = []
 
     for fold_idx, (train_idx, valid_idx) in enumerate(splitter.split(train_df), start=1):
         valid_start_time = train_df.loc[valid_idx[0], TIME_COL]
@@ -216,13 +217,19 @@ def _run_oof_for_gnn(
                     yy = batch["y"].to(device)
                     mk = batch["seq_padding_mask"].to(device)
                     pp = model(sx, gx, mk, graph_coords_km=coords, graph_time_days=gtd)
-                    val_loss_total += stgnn_asymmetric_loss(pp, yy).item() * len(yy)
+                    val_loss_total += stgnn_asymmetric_loss(pp, yy, late_weight=args.late_weight).item() * len(yy)
                     val_count += len(yy)
             val_loss = val_loss_total / max(val_count, 1)
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
             scheduler.step()
+
+        if best_state is None:
+            raise RuntimeError(
+                f"OOF fold {fold_idx}: 训练 {args.epochs} 轮后 best_state 仍为 None，"
+                "请检查模型是否正常训练（loss 可能为 NaN/Inf）"
+            )
 
         model.load_state_dict(best_state)
         model.eval()
@@ -252,12 +259,24 @@ def _run_oof_for_gnn(
             y_true_time=targets_arr[:, 1], y_pred_time=preds_arr[:, 1],
             late_weight=args.late_weight,
         )
+        fold_records.append({
+            "fold": fold_idx, "model": "gnn",
+            "train_size": len(train_idx_purged), "valid_size": len(valid_idx),
+            "purge_days": float(getattr(args, "purge_days", 30.0)),
+            "train_start": str(train_df.loc[train_idx_purged[0], TIME_COL])[:10],
+            "train_end": str(train_df.loc[train_idx_purged[-1], TIME_COL])[:10],
+            "valid_start": str(valid_start_time)[:10],
+            "valid_end": str(train_df.loc[valid_idx[-1], TIME_COL])[:10],
+            **metrics,
+        })
         print(f"  GNN Fold {fold_idx}/{args.n_splits} | MagRMSE={metrics['mag_rmse']:.3f} | TimeRMSE={metrics['time_rmse']:.3f}")
 
     oof_df = train_df[["mainshock_id", TIME_COL, *TARGET_COLS]].copy()
     oof_df["gnn_pred_mag"] = oof_preds[:, 0]
     oof_df["gnn_pred_time"] = oof_preds[:, 1]
-    return oof_df
+
+    fold_metrics_df = pd.DataFrame(fold_records)
+    return oof_df, fold_metrics_df
 
 
 def parse_args():
@@ -272,7 +291,8 @@ def parse_args():
     parser.add_argument("--gnn-radius-km", type=float, default=100.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save-dir", type=Path, default=PROJECT_ROOT / "data" / "models")
-    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--device", type=str, default="auto",
+                        help="设备: auto, cuda, mps, cpu")
     # OOF 模式参数
     parser.add_argument("--oof", action="store_true", help="OOF 交叉验证模式")
     parser.add_argument("--n-splits", type=int, default=5, help="OOF 折数")
@@ -286,6 +306,9 @@ def main():
     args = parse_args()
     set_random_seed(args.seed)
     torch.manual_seed(args.seed)
+
+    if args.epochs <= 0:
+        raise ValueError(f"epochs 必须 > 0, 当前: {args.epochs}")
 
     # ---- OOF 模式 ----
     if args.oof:
@@ -301,15 +324,21 @@ def main():
         df, event_df, global_cols = _prepare_features_for_gnn_oof(features_path, event_catalog_path)
         print(f"GNN OOF 模式: {len(df)} 样本, {len(global_cols)} 全局特征, {args.n_splits} 折")
 
-        oof_df = _run_oof_for_gnn(df, event_df, global_cols, args)
+        oof_df, fold_metrics_df = _run_oof_for_gnn(df, event_df, global_cols, args)
 
         oof_output.parent.mkdir(parents=True, exist_ok=True)
         oof_df.to_csv(oof_output, index=False, encoding="utf-8")
+        fold_metrics_df.to_csv(oof_output.parent / "gnn_cv_metrics.csv", index=False, encoding="utf-8")
+
         print(f"\nGNN OOF 预测已保存: {oof_output}")
+        print(f"GNN OOF 平均指标:")
+        metric_cols = [c for c in fold_metrics_df.columns if c not in {"fold","model","train_size","valid_size","purge_days","train_start","train_end","valid_start","valid_end"}]
+        for col in metric_cols:
+            print(f"  {col}: {fold_metrics_df[col].mean():.4f}")
         return
 
     # ---- 常规训练模式 ----
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    device = get_torch_device(args.device)
     print(f"设备: {device}")
 
     features_path = resolve_project_path(args.features)

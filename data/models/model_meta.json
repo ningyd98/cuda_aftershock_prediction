@@ -1,7 +1,7 @@
 {
-  "created_at": "2026-05-18T06:07:05.069051+00:00",
+  "created_at": "2026-05-18T08:31:28.771419+00:00",
   "training_data": "/Users/ningyedong/Coding/人工智能导论/余震预测技术国际大赛/data/processed/advanced_features.csv",
-  "feature_count": 74,
+  "feature_count": 94,
   "target_cols": [
     "target_max_mag",
     "target_time_to_max_days"
@@ -10,46 +10,51 @@
   "time_col": "mainshock_time",
   "model_type": "both",
   "model_backends": {
-    "baseline": "lightgbm_asymmetric_time",
+    "baseline": "lightgbm",
     "xgboost": "xgboost"
   },
   "n_splits": 5,
+  "purge_days": 30.0,
   "seed": 42,
   "late_weight": 2.0,
   "n_estimators": 300,
   "learning_rate": 0.03,
-  "use_asymmetric_time_objective": true,
+  "use_asymmetric_time_objective": false,
   "mean_metrics_by_model": {
     "baseline": {
-      "mag_rmse": 1.3805501359809031,
-      "mag_mae": 0.5899357030376418,
-      "time_rmse": 2.468723262625736,
-      "time_mae": 0.656697465697837,
-      "time_asymmetric_mae": 0.8959754346838537,
-      "time_asymmetric_rmse": 2.555716273913404
+      "purge_days": 30.0,
+      "mag_rmse": 0.5282611050837565,
+      "mag_mae": 0.42501859350546817,
+      "time_rmse": 8.652435298456812,
+      "time_mae": 6.774169466185559,
+      "time_asymmetric_mae": 8.662578391561869,
+      "time_asymmetric_rmse": 9.32330200841027
     },
     "xgboost": {
-      "mag_rmse": 1.3821632550164469,
-      "mag_mae": 0.5849367593568471,
-      "time_rmse": 2.4540006222786457,
-      "time_mae": 0.5737350322327862,
-      "time_asymmetric_mae": 0.7217225364953798,
-      "time_asymmetric_rmse": 2.4953458702693343
+      "purge_days": 30.0,
+      "mag_rmse": 0.5245727568487947,
+      "mag_mae": 0.4212952411790048,
+      "time_rmse": 8.612762901651228,
+      "time_mae": 6.752204029526256,
+      "time_asymmetric_mae": 8.548982331220477,
+      "time_asymmetric_rmse": 9.21172402049416
     }
   },
   "ensemble_weights": {
     "baseline": 0.32,
     "xgboost": 0.68,
     "dl": 0.0,
-    "gnn": 0.0
+    "gnn": 0.0,
+    "_mag_baseline_w": 0.32,
+    "_time_baseline_w": 0.22
   },
   "ensemble_metrics": {
-    "mag_rmse": 1.3700867846954146,
-    "mag_mae": 0.5864946686904919,
-    "time_rmse": 2.487452549692983,
-    "time_mae": 0.5990996747401981,
-    "time_asymmetric_mae": 0.7757084596135848,
-    "time_asymmetric_rmse": 2.5328698313401112,
-    "ensemble_objective": 3.902956616035526
+    "mag_rmse": 0.5245718096874582,
+    "mag_mae": 0.42088948094573153,
+    "time_rmse": 8.598028320337955,
+    "time_mae": 6.738729026837354,
+    "time_asymmetric_mae": 8.546512366364663,
+    "time_asymmetric_rmse": 9.203598416856797,
+    "ensemble_objective": 9.728170226544256
   }
 }

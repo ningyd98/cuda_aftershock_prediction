@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from src.utils import haversine_km, seismic_moment_from_mw
-
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.utils import haversine_km, seismic_moment_from_mw
 
 
 def load_event_catalog(raw_csv_path: str | Path) -> pd.DataFrame:

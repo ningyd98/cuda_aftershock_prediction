@@ -24,7 +24,7 @@ from src.features import (
     load_plate_boundaries,
     merge_gcmt_features,
 )
-from src.utils import haversine_km, seismic_moment_from_mw
+from src.utils import haversine_km, seismic_moment_from_mw, get_torch_device
 
 
 DEFAULT_TARGET_COLS = ["target_max_mag", "target_time_to_max_days"]
@@ -231,7 +231,7 @@ def load_feature_cols(path: Path) -> list[str]:
 
 def make_model_matrix(feature_df: pd.DataFrame, feature_cols: list[str]) -> pd.DataFrame:
     """按训练特征列构建推理矩阵，缺失列补 NaN，布尔列转 0/1。"""
-    model_df = feature_df.copy()
+    model_df = add_derived_features(feature_df.copy())
     for col in feature_cols:
         if col not in model_df.columns:
             model_df[col] = np.nan
@@ -239,6 +239,53 @@ def make_model_matrix(feature_df: pd.DataFrame, feature_cols: list[str]) -> pd.D
             model_df[col] = model_df[col].astype(int)
         model_df[col] = pd.to_numeric(model_df[col], errors="coerce")
     return model_df[feature_cols]
+
+
+def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
+    """添加交互特征和衍生特征（与训练时保持一致）。"""
+    if "mainshock_mag" in df.columns and "early_max_mag" in df.columns:
+        df["mag_ratio_early_main"] = df["early_max_mag"] / df["mainshock_mag"].clip(lower=1.0)
+        df["mag_diff_main_early"] = df["mainshock_mag"] - df["early_max_mag"]
+
+    if "early_energy_sum" in df.columns and "early_aftershock_count" in df.columns:
+        df["energy_per_event"] = df["early_energy_sum"] / df["early_aftershock_count"].clip(lower=1)
+        df["log_energy_sum"] = np.log1p(df["early_energy_sum"])
+
+    if "count_1h" in df.columns and "count_72h" in df.columns:
+        df["count_ratio_1h_72h"] = df["count_1h"] / df["count_72h"].clip(lower=1)
+        df["count_ratio_6h_72h"] = df.get("count_6h", 0) / df["count_72h"].clip(lower=1)
+        df["count_ratio_24h_72h"] = df.get("count_24h", 0) / df["count_72h"].clip(lower=1)
+
+    if "energy_1h" in df.columns and "energy_72h" in df.columns:
+        df["energy_ratio_1h_72h"] = df["energy_1h"] / df["energy_72h"].clip(lower=1e-10)
+        df["energy_ratio_24h_72h"] = df.get("energy_24h", 0) / df["energy_72h"].clip(lower=1e-10)
+
+    if "omori_p" in df.columns and "omori_c" in df.columns:
+        df["omori_p_times_c"] = df["omori_p"] * df["omori_c"]
+        df["omori_decay_rate"] = df["omori_p"] / df["omori_c"].clip(lower=1e-6)
+
+    if "etas_p" in df.columns and "etas_alpha" in df.columns:
+        df["etas_p_alpha_ratio"] = df["etas_p"] / df["etas_alpha"].clip(lower=1e-6)
+
+    if "anisotropy_major_axis_km" in df.columns and "mainshock_mag" in df.columns:
+        df["aniso_area_proxy"] = df["anisotropy_major_axis_km"] * df.get("anisotropy_minor_axis_km", 0)
+        df["aniso_per_mag"] = df["anisotropy_major_axis_km"] / df["mainshock_mag"].clip(lower=1.0)
+
+    if "plate_boundary_distance_km" in df.columns and "mainshock_mag" in df.columns:
+        df["plate_dist_per_mag"] = df["plate_boundary_distance_km"] / df["mainshock_mag"].clip(lower=1.0)
+        df["log_plate_dist"] = np.log1p(df["plate_boundary_distance_km"])
+
+    if "gr_b_value" in df.columns and "mainshock_mag" in df.columns:
+        df["b_value_times_mag"] = df["gr_b_value"] * df["mainshock_mag"]
+
+    if "mainshock_depth" in df.columns:
+        df["log_depth"] = np.log1p(df["mainshock_depth"].clip(lower=0))
+        df["depth_mag_ratio"] = df["mainshock_depth"] / df["mainshock_mag"].clip(lower=1.0)
+
+    if "productivity_index" in df.columns and "early_aftershock_count" in df.columns:
+        df["productivity_per_event"] = df["productivity_index"] / df["early_aftershock_count"].clip(lower=1)
+
+    return df
 
 
 def check_feature_consistency(
@@ -356,6 +403,11 @@ def configure_torch_inference_threads(torch_module) -> None:
         pass
 
 
+def _inference_device() -> "torch.device":
+    """推理时优先 MPS (macOS) / CUDA，回退 CPU。"""
+    return get_torch_device("auto")
+
+
 def load_dataset_preprocessors(meta: dict, meta_path: Path, default_name: str):
     """加载深度模型训练时保存的 Dataset 预处理器。"""
     preprocessor_name = meta.get("preprocessor_path", default_name)
@@ -380,7 +432,7 @@ def predict_with_dl(
     dl_meta_path: Path,
     event_df: pd.DataFrame,
     global_feature_df: pd.DataFrame,
-    device: str = "cpu",
+    device: str = "auto",
 ) -> np.ndarray | None:
     """加载深度学习 Transformer 模型并预测。
 
@@ -414,8 +466,8 @@ def predict_with_dl(
             nhead=dl_meta.get("nhead", 4),
             num_layers=dl_meta.get("num_layers", 3),
         )
-        model.load_state_dict(torch.load(dl_model_path, map_location=device, weights_only=True))
-        model.to(device)
+        model.load_state_dict(torch.load(dl_model_path, map_location=_dev, weights_only=True))
+        model.to(_dev)
         model.eval()
 
         # 构建 Dataset 获取单样本
@@ -434,9 +486,9 @@ def predict_with_dl(
         batch = earthquake_collate_fn([sample])
 
         with torch.no_grad():
-            seq_x = batch["seq_x"].to(device)
-            global_x = batch["global_x"].to(device)
-            mask = batch["seq_padding_mask"].to(device)
+            seq_x = batch["seq_x"].to(_dev)
+            global_x = batch["global_x"].to(_dev)
+            mask = batch["seq_padding_mask"].to(_dev)
             preds = model(seq_x, global_x, mask)
             return inverse_deep_time_transform(preds.cpu().numpy().reshape(1, 2), dl_meta)
     except Exception as exc:
@@ -449,7 +501,7 @@ def predict_with_gnn(
     gnn_meta_path: Path,
     event_df: pd.DataFrame,
     global_feature_df: pd.DataFrame,
-    device: str = "cpu",
+    device: str = "auto",
 ) -> np.ndarray | None:
     """加载 ST-GNN 模型并预测；模型不可用时返回 None。"""
     if not gnn_model_path.exists() or not gnn_meta_path.exists():
@@ -458,6 +510,7 @@ def predict_with_gnn(
     try:
         import torch
         configure_torch_inference_threads(torch)
+        _dev = get_torch_device(device)
 
         with gnn_meta_path.open("r", encoding="utf-8") as file:
             gnn_meta = json.load(file)
@@ -484,8 +537,8 @@ def predict_with_gnn(
             num_gnn_layers=gnn_meta.get("num_gnn_layers", 3),
             gnn_radius_km=gnn_meta.get("gnn_radius_km", 100.0),
         )
-        model.load_state_dict(torch.load(gnn_model_path, map_location=device, weights_only=True))
-        model.to(device)
+        model.load_state_dict(torch.load(gnn_model_path, map_location=_dev, weights_only=True))
+        model.to(_dev)
         model.eval()
 
         seq_config = SequenceBuildConfig(obs_days=3.0, spatial_radius_km=100.0, max_seq_len=256)
@@ -500,11 +553,11 @@ def predict_with_gnn(
         batch = earthquake_collate_fn([dataset[0]])
 
         with torch.no_grad():
-            seq_x = batch["seq_x"].to(device)
-            global_x = batch["global_x"].to(device)
-            graph_coords_km = batch["graph_coords_km"].to(device)
-            graph_time_days = batch["graph_time_days"].to(device)
-            mask = batch["seq_padding_mask"].to(device)
+            seq_x = batch["seq_x"].to(_dev)
+            global_x = batch["global_x"].to(_dev)
+            graph_coords_km = batch["graph_coords_km"].to(_dev)
+            graph_time_days = batch["graph_time_days"].to(_dev)
+            mask = batch["seq_padding_mask"].to(_dev)
             preds = model(
                 seq_x,
                 global_x,
@@ -639,7 +692,8 @@ def main() -> None:
 
     try:
         feature_cols = load_feature_cols(feature_cols_path)
-        check_feature_consistency(feature_df, feature_cols)
+        enriched_df = add_derived_features(feature_df.copy())
+        check_feature_consistency(enriched_df, feature_cols)
         X = make_model_matrix(feature_df, feature_cols)
         weights = load_ensemble_weights(ensemble_weights_path)
 
@@ -698,8 +752,8 @@ def main() -> None:
                 fused_time += pred[0, 1] * w_time
                 total_time_w += w_time
 
-        pred_mag = fused_mag / total_mag_w if total_mag_w > 0 else model_preds["baseline"][0, 0]
-        pred_time = fused_time / total_time_w if total_time_w > 0 else model_preds["baseline"][0, 1]
+        pred_mag = fused_mag / total_mag_w if total_mag_w > 0 else next(iter(model_preds.values()))[0, 0]
+        pred_time = fused_time / total_time_w if total_time_w > 0 else next(iter(model_preds.values()))[0, 1]
         pred = np.array([[pred_mag, pred_time]], dtype=float)
 
         loaded_info = ", ".join(

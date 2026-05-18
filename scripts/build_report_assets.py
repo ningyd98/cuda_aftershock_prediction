@@ -430,7 +430,7 @@ def make_tables(
         ["地质构造", "plate_type_*/distance", "最近板块边界类型和距离"],
         ["震源机制", "strike/dip/rake/fault_type_*", "Global CMT 断层滑动类型与 P/T 轴"],
     ]
-    write_table(TABLE_DIR / "feature_groups.tex", ["特征组", "代表字段", "物理含义"], feature_groups, "p{0.18\\textwidth}p{0.28\\textwidth}p{0.44\\textwidth}")
+    write_table(TABLE_DIR / "feature_groups.tex", ["特征组", "代表字段", "物理含义"], feature_groups, "p{0.16\\textwidth}p{0.34\\textwidth}p{0.40\\textwidth}")
 
     validity_rows = []
     for name, col in [
@@ -485,7 +485,7 @@ def make_tables(
         TABLE_DIR / "model_mean_metrics.tex",
         ["模型", "Mag RMSE", "Mag MAE", "Time RMSE", "Time MAE", "Asym MAE", "Asym RMSE"],
         mean_rows,
-        "lrrrrrr",
+        "p{0.16\\textwidth}rrrrrr",
     )
 
     ensemble_metrics = model_meta.get("ensemble_metrics", {})
@@ -527,7 +527,7 @@ def make_tables(
         ["src/models_gnn.py", "有向时空因果 ST-GNN"],
         ["scripts/make_submission.py", "端到端单序列推理与提交格式化"],
     ]
-    write_table(TABLE_DIR / "module_structure.tex", ["模块", "职责"], modules, "p{0.28\\textwidth}p{0.62\\textwidth}")
+    write_table(TABLE_DIR / "module_structure.tex", ["模块", "职责"], modules, "p{0.36\\textwidth}p{0.52\\textwidth}")
 
     summary_rows = [
         ["主震样本数", len(features)],
