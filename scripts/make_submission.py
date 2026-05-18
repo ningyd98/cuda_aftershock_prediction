@@ -291,17 +291,51 @@ def check_feature_consistency(
 
 
 def load_ensemble_weights(path: Path | None) -> dict:
-    """读取融合权重，缺省使用 baseline=1。"""
+    """读取融合权重。
+
+    支持两种格式:
+    1. 新格式 (双目标独立权重):
+       {"mag": {"baseline":..., "xgboost":..., ...},
+        "time": {"baseline":..., "xgboost":..., ...}}
+    2. 旧格式 (单层权重，向下兼容):
+       {"baseline":..., "xgboost":..., "dl":..., "gnn":...}
+       → 自动转换为 mag/time 共用同一组权重。
+    """
     if path is None or not path.exists():
         return {"baseline": 1.0, "xgboost": 0.0, "dl": 0.0, "gnn": 0.0}
+
     with path.open("r", encoding="utf-8") as file:
-        weights = json.load(file)
-    return {
-        "baseline": float(weights.get("baseline", 1.0)),
-        "xgboost": float(weights.get("xgboost", 0.0)),
-        "dl": float(weights.get("dl", 0.0)),
-        "gnn": float(weights.get("gnn", 0.0)),
+        data = json.load(file)
+
+    # 检测新格式
+    if isinstance(data, dict) and "mag" in data and "time" in data:
+        # 新格式: {"mag": {...}, "time": {...}}
+        return {
+            "mag": {
+                "baseline": float(data["mag"].get("baseline", 0.0)),
+                "xgboost": float(data["mag"].get("xgboost", 0.0)),
+                "dl": float(data["mag"].get("dl", 0.0)),
+                "gnn": float(data["mag"].get("gnn", 0.0)),
+            },
+            "time": {
+                "baseline": float(data["time"].get("baseline", 0.0)),
+                "xgboost": float(data["time"].get("xgboost", 0.0)),
+                "dl": float(data["time"].get("dl", 0.0)),
+                "gnn": float(data["time"].get("gnn", 0.0)),
+            },
+        }
+
+    # 旧格式: 单层权重
+    base = {
+        "baseline": float(data.get("baseline", 1.0)),
+        "xgboost": float(data.get("xgboost", 0.0)),
+        "dl": float(data.get("dl", 0.0)),
+        "gnn": float(data.get("gnn", 0.0)),
     }
+    total = sum(base.values())
+    if total > 0:
+        base = {k: v / total for k, v in base.items()}
+    return {"mag": dict(base), "time": dict(base)}
 
 
 def predict_with_baseline(model_path: Path, X: pd.DataFrame) -> np.ndarray:
@@ -609,64 +643,70 @@ def main() -> None:
         X = make_model_matrix(feature_df, feature_cols)
         weights = load_ensemble_weights(ensemble_weights_path)
 
-        weighted_preds: list[tuple[str, float, np.ndarray]] = []
+        # 提取双目标权重
+        mag_weights = weights.get("mag", weights)  # compat: 旧格式是单层 dict
+        time_weights = weights.get("time", weights)
 
-        baseline_weight = max(float(weights.get("baseline", 1.0)), 0.0)
-        if baseline_weight > 0 and baseline_model_path.exists():
-            baseline_pred = predict_with_baseline(baseline_model_path, X)
-            weighted_preds.append(("baseline", baseline_weight, baseline_pred))
-        elif baseline_weight > 0:
-            print(f"   baseline 权重大于 0，但模型不存在，已跳过: {baseline_model_path}")
+        # 各模型独立预测，不在 mag/time 间交叉
+        model_preds: dict[str, np.ndarray] = {}
 
-        # XGBoost 预测（如可用）
-        xgb_weight = max(float(weights.get("xgboost", 0.0)), 0.0)
-        if xgb_weight > 0:
+        baseline_weight_mag = max(float(mag_weights.get("baseline", 1.0)), 0.0)
+        baseline_weight_time = max(float(time_weights.get("baseline", 1.0)), 0.0)
+        if (baseline_weight_mag > 0 or baseline_weight_time > 0) and baseline_model_path.exists():
+            model_preds["baseline"] = predict_with_baseline(baseline_model_path, X)
+
+        xgb_weight_mag = max(float(mag_weights.get("xgboost", 0.0)), 0.0)
+        xgb_weight_time = max(float(time_weights.get("xgboost", 0.0)), 0.0)
+        if (xgb_weight_mag > 0 or xgb_weight_time > 0):
             xgb_model_path = baseline_model_path.parent / "xgboost_model.joblib"
             if xgb_model_path.exists():
-                xgb_pred = predict_with_baseline(xgb_model_path, X)
-                weighted_preds.append(("xgboost", xgb_weight, xgb_pred))
-            else:
-                print(f"   XGBoost 权重大于 0，但模型不存在，已跳过: {xgb_model_path}")
+                model_preds["xgboost"] = predict_with_baseline(xgb_model_path, X)
 
-        # DL 预测（如可用）
-        dl_weight = max(float(weights.get("dl", 0.0)), 0.0)
-        if dl_weight > 0:
+        dl_weight_mag = max(float(mag_weights.get("dl", 0.0)), 0.0)
+        dl_weight_time = max(float(time_weights.get("dl", 0.0)), 0.0)
+        if (dl_weight_mag > 0 or dl_weight_time > 0):
             dl_model_path = baseline_model_path.parent / "dl_model.pt"
             dl_meta_path = baseline_model_path.parent / "dl_meta.json"
-            dl_pred = predict_with_dl(
-                dl_model_path, dl_meta_path,
-                event_df, feature_df,
-            )
+            dl_pred = predict_with_dl(dl_model_path, dl_meta_path, event_df, feature_df)
             if dl_pred is not None:
-                weighted_preds.append(("dl", dl_weight, dl_pred))
-            else:
-                print("   DL 权重大于 0，但模型不可用，已跳过")
+                model_preds["dl"] = dl_pred
 
-        # GNN 预测（如可用）
-        gnn_weight = max(float(weights.get("gnn", 0.0)), 0.0)
-        if gnn_weight > 0:
+        gnn_weight_mag = max(float(mag_weights.get("gnn", 0.0)), 0.0)
+        gnn_weight_time = max(float(time_weights.get("gnn", 0.0)), 0.0)
+        if (gnn_weight_mag > 0 or gnn_weight_time > 0):
             gnn_model_path = baseline_model_path.parent / "gnn_model.pt"
             gnn_meta_path = baseline_model_path.parent / "gnn_meta.json"
-            gnn_pred = predict_with_gnn(
-                gnn_model_path, gnn_meta_path,
-                event_df, feature_df,
-            )
+            gnn_pred = predict_with_gnn(gnn_model_path, gnn_meta_path, event_df, feature_df)
             if gnn_pred is not None:
-                weighted_preds.append(("gnn", gnn_weight, gnn_pred))
-            else:
-                print("   GNN 权重大于 0，但模型不可用，已跳过")
+                model_preds["gnn"] = gnn_pred
 
-        if not weighted_preds:
+        if not model_preds:
             raise FileNotFoundError("没有任何可用模型参与融合。")
 
-        total_weight = sum(weight for _, weight, _ in weighted_preds)
-        fused_pred = sum(pred_item * weight for _, weight, pred_item in weighted_preds)
-        pred = fused_pred / total_weight
-        loaded_names = ", ".join(
-            f"{name}:{weight / total_weight:.3f}"
-            for name, weight, _ in weighted_preds
+        # 震级和时间分别加权融合
+        fused_mag = 0.0
+        fused_time = 0.0
+        total_mag_w = 0.0
+        total_time_w = 0.0
+        for name, pred in model_preds.items():
+            w_mag = max(float(mag_weights.get(name, 0.0)), 0.0)
+            w_time = max(float(time_weights.get(name, 0.0)), 0.0)
+            if w_mag > 0:
+                fused_mag += pred[0, 0] * w_mag
+                total_mag_w += w_mag
+            if w_time > 0:
+                fused_time += pred[0, 1] * w_time
+                total_time_w += w_time
+
+        pred_mag = fused_mag / total_mag_w if total_mag_w > 0 else model_preds["baseline"][0, 0]
+        pred_time = fused_time / total_time_w if total_time_w > 0 else model_preds["baseline"][0, 1]
+        pred = np.array([[pred_mag, pred_time]], dtype=float)
+
+        loaded_info = ", ".join(
+            f"{n}(m:{mag_weights.get(n,0):.3f}/t:{time_weights.get(n,0):.3f})"
+            for n in model_preds
         )
-        print(f"   已加载模型并归一融合: {loaded_names}")
+        print(f"   双目标融合: {loaded_info}")
     except Exception as exc:
         if not args.allow_rule_fallback:
             raise RuntimeError(

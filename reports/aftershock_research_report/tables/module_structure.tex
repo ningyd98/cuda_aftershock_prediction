@@ -1,0 +1,15 @@
+\begin{tabular}{p{0.28\textwidth}p{0.62\textwidth}}
+\toprule
+模块 & 职责 \\
+\midrule
+main.py & 统一命令入口，串联下载、序列、特征、训练和推理 \\
+run.sh & 一键比赛流水线，支持跳过下载和可选 DL/GNN \\
+src/data\_loader.py & 主震-余震序列构建与目标生成 \\
+src/features.py & 地震学特征、板块边界、GCMT 震源机制融合 \\
+src/models.py & LightGBM/XGBoost Baseline 与非对称目标 \\
+src/dataset.py & 深度学习序列 Dataset、防泄漏预处理器 \\
+src/models\_dl.py & Transformer 双输入融合模型 \\
+src/models\_gnn.py & 有向时空因果 ST-GNN \\
+scripts/make\_submission.py & 端到端单序列推理与提交格式化 \\
+\bottomrule
+\end{tabular}

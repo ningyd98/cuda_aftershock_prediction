@@ -1,0 +1,11 @@
+\begin{tabular}{p{0.24\textwidth}p{0.36\textwidth}p{0.30\textwidth}}
+\toprule
+数据源 & 路径 & 用途 \\
+\midrule
+USGS Mw≥4.0 浅源目录 & data/raw/USGS\_Mw4.0\_Depth70\_1970-2023.csv & 重建主震后 3 天早期余震序列 \\
+USGS Mw≥6.0 主震目录 & data/raw/USGS\_Mw6.0\_Depth70\_1970-2023.csv & 确定强震主震样本 \\
+PB2002 板块边界 & data/raw/PB2002\_boundaries.json & 最近板块边界距离与边界类型 \\
+Global CMT & data/raw/GlobalCMT\_1976-2024.csv & 震源机制 strike/dip/rake 与断层类型 \\
+比赛验证序列 & data/test\_sequences/*\_eq.csv & 20 条单序列推理验证 \\
+\bottomrule
+\end{tabular}

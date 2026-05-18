@@ -1,6 +1,10 @@
 {
-  "baseline": 0.32,
-  "xgboost": 0.68,
-  "dl": 0.0,
-  "gnn": 0.0
+  "mag": {
+    "baseline": 0.5,
+    "xgboost": 0.5
+  },
+  "time": {
+    "baseline": 0.2,
+    "xgboost": 0.8
+  }
 }

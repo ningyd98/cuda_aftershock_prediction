@@ -1,0 +1,20 @@
+{
+  "mag_search_objective": "mag_rmse",
+  "mag_best_value": 1.3676,
+  "time_search_objective": "time_asymmetric_rmse",
+  "time_best_value": 2.5315,
+  "ensemble_metrics": {
+    "mag_rmse": 1.3676,
+    "mag_mae": 0.5874,
+    "time_rmse": 2.4888,
+    "time_mae": 0.5896,
+    "time_asymmetric_mae": 0.7554,
+    "time_asymmetric_rmse": 2.5315
+  },
+  "available_models": [
+    "baseline",
+    "xgboost"
+  ],
+  "grid_step": 0.05,
+  "late_weight": 2.0
+}

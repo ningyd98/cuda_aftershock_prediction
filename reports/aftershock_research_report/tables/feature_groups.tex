@@ -1,0 +1,13 @@
+\begin{tabular}{p{0.18\textwidth}p{0.28\textwidth}p{0.44\textwidth}}
+\toprule
+特征组 & 代表字段 & 物理含义 \\
+\midrule
+地震活动性 & early/count/energy & 早期余震数量、能量、分箱释放过程 \\
+G-R 定律 & gr\_b\_value/gr\_a\_value/gr\_mc & MAXC 估计 Mc，Aki-Utsu MLE 估计 b 值 \\
+大森-宇津 & omori\_p/omori\_c/omori\_k & 非齐次泊松过程 MLE 拟合余震衰减 \\
+Båth/生产率 & bath\_deficit/productivity\_index & 刻画主震后最大余震缺口与生产率水平 \\
+空间各向异性 & anisotropy\_* & 用协方差主轴表征破裂方向性 \\
+地质构造 & plate\_type\_*/distance & 最近板块边界类型和距离 \\
+震源机制 & strike/dip/rake/fault\_type\_* & Global CMT 断层滑动类型与 P/T 轴 \\
+\bottomrule
+\end{tabular}

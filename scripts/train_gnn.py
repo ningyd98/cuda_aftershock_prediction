@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import torch
 import joblib
+from sklearn.model_selection import TimeSeriesSplit
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -124,6 +125,141 @@ def evaluate_model(model, dataloader, device, late_weight=2.0):
     )
 
 
+# ============================================================
+#  OOF 模式 — TimeSeriesSplit + purge
+# ============================================================
+
+def _prepare_features_for_gnn_oof(
+    features_path: Path,
+    event_catalog_path: Path,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    df = pd.read_csv(features_path)
+    df[TIME_COL] = pd.to_datetime(df[TIME_COL], utc=True, errors="coerce")
+    df = df.dropna(subset=[TIME_COL, *TARGET_COLS]).sort_values(TIME_COL).reset_index(drop=True)
+
+    event_df = pd.read_csv(event_catalog_path)
+    event_df["time"] = pd.to_datetime(event_df["time"], utc=True, errors="coerce")
+
+    global_cols = select_global_feature_cols(df)
+    return df, event_df, global_cols
+
+
+def _run_oof_for_gnn(
+    df: pd.DataFrame,
+    event_df: pd.DataFrame,
+    global_cols: list[str],
+    args: argparse.Namespace,
+) -> pd.DataFrame:
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    train_df = df.sort_values(TIME_COL).reset_index(drop=True)
+    splitter = TimeSeriesSplit(n_splits=args.n_splits)
+    purge_delta = pd.Timedelta(days=float(getattr(args, "purge_days", 30.0)))
+
+    seq_config = SequenceBuildConfig(obs_days=3.0, spatial_radius_km=100.0, max_seq_len=256)
+    oof_preds = np.full((len(train_df), len(TARGET_COLS)), np.nan, dtype=float)
+
+    for fold_idx, (train_idx, valid_idx) in enumerate(splitter.split(train_df), start=1):
+        valid_start_time = train_df.loc[valid_idx[0], TIME_COL]
+        purge_cutoff = valid_start_time - purge_delta
+        purge_mask = train_df.loc[train_idx, TIME_COL] <= purge_cutoff
+        train_idx_purged = train_idx[purge_mask.values]
+        if len(train_idx_purged) < max(10, len(train_idx) * 0.3):
+            train_idx_purged = train_idx
+
+        fold_train_df = train_df.iloc[train_idx_purged].copy()
+        fold_valid_df = train_df.iloc[valid_idx].copy()
+
+        preprocessors = fit_dataset_preprocessors(
+            sequence_df=fold_train_df, event_catalog_df=event_df,
+            global_feature_cols=global_cols, target_cols=TARGET_COLS,
+            config=seq_config, scaler_type="robust", add_missing_indicators=True,
+        )
+        train_dataset = EarthquakeSequenceDataset(
+            sequence_df=fold_train_df, event_catalog_df=event_df,
+            global_feature_cols=global_cols, target_cols=TARGET_COLS,
+            config=seq_config, preprocessors=preprocessors, fit_preprocessors=False,
+        )
+        valid_dataset = EarthquakeSequenceDataset(
+            sequence_df=fold_valid_df, event_catalog_df=event_df,
+            global_feature_cols=global_cols, target_cols=TARGET_COLS,
+            config=seq_config, preprocessors=preprocessors, fit_preprocessors=False,
+        )
+
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
+                                  collate_fn=earthquake_collate_fn, num_workers=0)
+        valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False,
+                                  collate_fn=earthquake_collate_fn, num_workers=0)
+
+        model = STGNNPredictor(
+            event_feature_dim=len(train_dataset.event_feature_cols),
+            global_feature_dim=train_dataset.global_feature_dim,
+            node_hidden_dim=args.node_hidden,
+            num_gnn_layers=args.gnn_layers,
+            gnn_radius_km=args.gnn_radius_km,
+        ).to(device)
+
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+        best_val_loss = float("inf")
+        best_state = None
+
+        for _ in range(args.epochs):
+            train_loss = train_one_epoch(model, train_loader, optimizer, device)
+            model.eval()
+            val_loss_total, val_count = 0.0, 0
+            with torch.no_grad():
+                for batch in valid_loader:
+                    sx = batch["seq_x"].to(device)
+                    gx = batch["global_x"].to(device)
+                    coords = batch["graph_coords_km"].to(device)
+                    gtd = batch["graph_time_days"].to(device)
+                    yy = batch["y"].to(device)
+                    mk = batch["seq_padding_mask"].to(device)
+                    pp = model(sx, gx, mk, graph_coords_km=coords, graph_time_days=gtd)
+                    val_loss_total += stgnn_asymmetric_loss(pp, yy).item() * len(yy)
+                    val_count += len(yy)
+            val_loss = val_loss_total / max(val_count, 1)
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            scheduler.step()
+
+        model.load_state_dict(best_state)
+        model.eval()
+
+        all_preds, all_targets = [], []
+        with torch.no_grad():
+            for batch in valid_loader:
+                sx = batch["seq_x"].to(device)
+                gx = batch["global_x"].to(device)
+                coords = batch["graph_coords_km"].to(device)
+                gtd = batch["graph_time_days"].to(device)
+                yy = batch["y"].to(device)
+                mk = batch["seq_padding_mask"].to(device)
+                pp = model(sx, gx, mk, graph_coords_km=coords, graph_time_days=gtd)
+                all_preds.append(pp.cpu().numpy())
+                all_targets.append(yy.cpu().numpy())
+
+        preds_arr = np.clip(np.concatenate(all_preds, axis=0), a_min=0.0, a_max=None)
+        targets_arr = np.concatenate(all_targets, axis=0)
+        preds_arr[:, 1] = np.expm1(np.clip(preds_arr[:, 1], 0.0, 50.0))
+        targets_arr[:, 1] = np.expm1(np.clip(targets_arr[:, 1], 0.0, 50.0))
+        oof_preds[valid_idx] = preds_arr
+
+        from src.evaluator import calculate_metrics
+        metrics = calculate_metrics(
+            y_true_mag=targets_arr[:, 0], y_pred_mag=preds_arr[:, 0],
+            y_true_time=targets_arr[:, 1], y_pred_time=preds_arr[:, 1],
+            late_weight=args.late_weight,
+        )
+        print(f"  GNN Fold {fold_idx}/{args.n_splits} | MagRMSE={metrics['mag_rmse']:.3f} | TimeRMSE={metrics['time_rmse']:.3f}")
+
+    oof_df = train_df[["mainshock_id", TIME_COL, *TARGET_COLS]].copy()
+    oof_df["gnn_pred_mag"] = oof_preds[:, 0]
+    oof_df["gnn_pred_time"] = oof_preds[:, 1]
+    return oof_df
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="训练 ST-GNN 余震预测模型")
     parser.add_argument("--features", type=Path, default=PROJECT_ROOT / "data" / "processed" / "advanced_features.csv")
@@ -137,6 +273,12 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save-dir", type=Path, default=PROJECT_ROOT / "data" / "models")
     parser.add_argument("--device", type=str, default="cpu")
+    # OOF 模式参数
+    parser.add_argument("--oof", action="store_true", help="OOF 交叉验证模式")
+    parser.add_argument("--n-splits", type=int, default=5, help="OOF 折数")
+    parser.add_argument("--purge-days", type=float, default=30.0, help="OOF purge 天数")
+    parser.add_argument("--oof-output", type=Path, default=None, help="OOF 预测输出路径")
+    parser.add_argument("--late-weight", type=float, default=2.0, help="预测偏晚惩罚权重")
     return parser.parse_args()
 
 
@@ -144,6 +286,29 @@ def main():
     args = parse_args()
     set_random_seed(args.seed)
     torch.manual_seed(args.seed)
+
+    # ---- OOF 模式 ----
+    if args.oof:
+        features_path = resolve_project_path(args.features)
+        event_catalog_path = resolve_project_path(args.event_catalog)
+        if not event_catalog_path.exists():
+            event_catalog_path = PROJECT_ROOT / "data" / "raw" / "USGS_Mw6.0_Depth70_1970-2023.csv"
+
+        oof_output = resolve_project_path(args.oof_output) if args.oof_output else (
+            resolve_project_path(args.save_dir) / "gnn_oof_predictions.csv"
+        )
+
+        df, event_df, global_cols = _prepare_features_for_gnn_oof(features_path, event_catalog_path)
+        print(f"GNN OOF 模式: {len(df)} 样本, {len(global_cols)} 全局特征, {args.n_splits} 折")
+
+        oof_df = _run_oof_for_gnn(df, event_df, global_cols, args)
+
+        oof_output.parent.mkdir(parents=True, exist_ok=True)
+        oof_df.to_csv(oof_output, index=False, encoding="utf-8")
+        print(f"\nGNN OOF 预测已保存: {oof_output}")
+        return
+
+    # ---- 常规训练模式 ----
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print(f"设备: {device}")
 

@@ -103,6 +103,73 @@ python main.py make-submission \
     --allow-rule-fallback
 ```
 
+### 6. 多模型 OOF 融合 (推荐)
+
+```bash
+# 在已训练树模型的基础上，生成 DL/GNN 的 OOF 预测并搜索融合权重
+python scripts/train_dl.py --oof --n-splits 5 --purge-days 30 --save-dir data/models
+python scripts/train_gnn.py --oof --n-splits 5 --purge-days 30 --save-dir data/models
+
+# 搜索震级和时间独立权重
+python scripts/train_ensemble.py --model-dir data/models --grid-step 0.02
+
+# 或在 run.sh 中一键完成
+./run.sh --skip-download --train-oof-ensemble
+```
+
+## 模型融合策略
+
+### OOF 融合原理
+
+每个模型在时间序列交叉验证 (TimeSeriesSplit, n=5) 中生成
+Out-Of-Fold (OOF) 预测，即每条训练样本都有一条"该样本未被用于训练时"
+的预测。融合权重在 OOF 预测上搜索，而非训练集指标，以保证泛化性。
+
+### 为什么震级和时间使用不同权重？
+
+地震学中，**震级预测**和**时间预测**是两种截然不同的物理任务：
+
+- **震级 (Mag)**: 主震释放能量后地壳应力降控制最大余震震级；
+  G-R 定律 b 值和 Båth 定律 Δm 是核心特征；
+  LightGBM 通常在震级任务上最优。
+
+- **时间 (Time)**: 大森-宇津定律 p 值控制余震衰减速率；
+  ETAS 模型参数 μ/K0/α 捕捉触发级联；
+  Transformer/ST-GNN 的自注意力机制擅长捕获
+  "早期余震的时间模式"。
+
+因此为 `mag` 和 `time` 目标**独立搜索**最优融合权重，比共用一组
+权重效果更好。
+
+### 融合权重文件格式
+
+```json
+{
+  "mag": {
+    "baseline": 0.60,
+    "xgboost": 0.25,
+    "dl": 0.10,
+    "gnn": 0.05
+  },
+  "time": {
+    "baseline": 0.45,
+    "xgboost": 0.20,
+    "dl": 0.25,
+    "gnn": 0.10
+  }
+}
+```
+
+### 比较单模型与融合模型
+
+```bash
+# 运行融合后会输出对比表：
+python scripts/train_ensemble.py --model-dir data/models
+```
+
+重点关注 OOF 指标，而非训练集指标。OOF 指标直接反映
+模型对"未见过的未来地震"的预测能力。
+
 ## 关键设计
 
 | 维度 | 方案 |

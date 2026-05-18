@@ -7,6 +7,7 @@
 #    ./run.sh --skip-download --with-dl    # 额外训练 Transformer
 #    ./run.sh --skip-download --with-gnn   # 额外训练 ST-GNN
 #    ./run.sh --skip-download --with-deep  # 同时训练 Transformer + ST-GNN
+#    ./run.sh --train-oof-ensemble         # 全模型 OOF 融合（含深度模型）
 #    ./run.sh --no-install                 # 跳过 pip install（依赖已就绪）
 #    ./run.sh --install                    # 强制重新安装依赖
 #    ./run.sh train-only                   # 只重训模型并重新生成提交
@@ -41,14 +42,16 @@ show_usage() {
   ./run.sh [选项] [train-only]
 
 选项:
-  --skip-download   跳过数据下载
-  --skip-dl         兼容旧参数，等价于 --skip-download
-  --with-dl         训练 Transformer，并在产物存在时参与融合
-  --with-gnn        训练 ST-GNN，并在产物存在时参与融合
-  --with-deep       同时开启 --with-dl 和 --with-gnn
-  --with-gcmt       下载/使用 Global CMT 震源机制解
-  --mock-eval       运行模拟线上评测
-  train-only        只重训模型并重新生成提交，不重建序列和特征
+  --skip-download     跳过数据下载
+  --with-dl           训练 Transformer，并在产物存在时参与融合
+  --with-gnn          训练 ST-GNN，并在产物存在时参与融合
+  --with-deep         同时开启 --with-dl 和 --with-gnn
+  --with-gcmt         下载/使用 Global CMT 震源机制解
+  --mock-eval         运行模拟线上评测
+  --train-oof-ensemble 全模型 OOF 融合 (树+DL+GNN)，输出双目标权重
+  --no-install        跳过 pip install
+  --install           强制重新安装依赖
+  train-only          只重训模型并重新生成提交
 EOF
 }
 
@@ -60,6 +63,7 @@ WITH_GCMT=false
 MOCK_EVAL=false
 NO_INSTALL=false
 FORCE_INSTALL=false
+TRAIN_OOF_ENSEMBLE=false
 
 for arg in "$@"; do
     case "$arg" in
@@ -75,6 +79,7 @@ for arg in "$@"; do
         --mock-eval) MOCK_EVAL=true ;;
         --no-install) NO_INSTALL=true ;;
         --install) FORCE_INSTALL=true ;;
+        --train-oof-ensemble) TRAIN_OOF_ENSEMBLE=true ;;
         train-only) TRAIN_ONLY=true ;;
         -h|--help) show_usage; exit 0 ;;
         *) error "未知参数: $arg" ;;
@@ -208,6 +213,50 @@ if [ "$WITH_GNN" = true ]; then
         --save-dir "$MODEL_DIR" \
         --device cpu
     info "ST-GNN 训练完成 ✓"
+fi
+
+# ---- OOF 融合模式 ----
+if [ "$TRAIN_OOF_ENSEMBLE" = true ]; then
+    step "5x. 全模型 OOF 交叉验证"
+
+    # 5x-a: 树模型 OOF (train_baseline.py 在 step 5 已输出 oof_predictions.csv)
+    if [ ! -f "$MODEL_DIR/oof_predictions.csv" ]; then
+        warn "树模型 OOF 文件缺失，请确保 step 5 已正确输出"
+    else
+        info "树模型 OOF 已就绪: ${MODEL_DIR}/oof_predictions.csv"
+    fi
+
+    # 5x-b: DL OOF
+    info "训练 DL OOF ..."
+    "${PYTHON}" scripts/train_dl.py \
+        --features "$ADVANCED_FEATURES" \
+        --event-catalog "$DL_CATALOG" \
+        --epochs 30 \
+        --batch-size 32 \
+        --save-dir "$MODEL_DIR" \
+        --device cpu \
+        --oof --n-splits 5 --purge-days 30 \
+        --oof-output "$MODEL_DIR/dl_oof_predictions.csv"
+
+    # 5x-c: GNN OOF
+    info "训练 GNN OOF ..."
+    "${PYTHON}" scripts/train_gnn.py \
+        --features "$ADVANCED_FEATURES" \
+        --event-catalog "$DL_CATALOG" \
+        --epochs 30 \
+        --batch-size 16 \
+        --save-dir "$MODEL_DIR" \
+        --device cpu \
+        --oof --n-splits 5 --purge-days 30 \
+        --oof-output "$MODEL_DIR/gnn_oof_predictions.csv"
+
+    # 5x-d: 融合权重搜索
+    step "5y. 多模型 OOF 融合权重搜索"
+    "${PYTHON}" scripts/train_ensemble.py \
+        --model-dir "$MODEL_DIR" \
+        --grid-step 0.02
+
+    info "OOF 融合完成 ✓"
 fi
 
 step "5d. 更新可用模型融合权重"

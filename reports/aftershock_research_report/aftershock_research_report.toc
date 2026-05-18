@@ -1,0 +1,40 @@
+\contentsline {chapter}{摘要}{I}{chapter*.1}%
+\contentsline {chapter}{\numberline {第一章\hspace {.3em}}引言}{1}{chapter.1}%
+\contentsline {section}{\numberline {1.1}研究背景}{1}{section.1.1}%
+\contentsline {section}{\numberline {1.2}研究目标}{1}{section.1.2}%
+\contentsline {section}{\numberline {1.3}工程流水线概览}{2}{section.1.3}%
+\contentsline {chapter}{\numberline {第二章\hspace {.3em}}数据集与样本构建}{3}{chapter.2}%
+\contentsline {section}{\numberline {2.1}数据源}{3}{section.2.1}%
+\contentsline {section}{\numberline {2.2}主震--余震样本定义}{4}{section.2.2}%
+\contentsline {section}{\numberline {2.3}目标变量分布}{5}{section.2.3}%
+\contentsline {section}{\numberline {2.4}早期余震观测量}{5}{section.2.4}%
+\contentsline {chapter}{\numberline {第三章\hspace {.3em}}高级地震学特征工程}{7}{chapter.3}%
+\contentsline {section}{\numberline {3.1}特征体系总览}{7}{section.3.1}%
+\contentsline {section}{\numberline {3.2}Gutenberg--Richter 定律与完整性震级}{7}{section.3.2}%
+\contentsline {section}{\numberline {3.3}大森--宇津定律与余震衰减}{8}{section.3.3}%
+\contentsline {section}{\numberline {3.4}Båth's Law 与早期最大余震缺口}{8}{section.3.4}%
+\contentsline {section}{\numberline {3.5}空间各向异性与断层方向性}{9}{section.3.5}%
+\contentsline {section}{\numberline {3.6}构造背景与震源机制}{9}{section.3.6}%
+\contentsline {section}{\numberline {3.7}特征有效性分析}{10}{section.3.7}%
+\contentsline {chapter}{\numberline {第四章\hspace {.3em}}模型方法}{12}{chapter.4}%
+\contentsline {section}{\numberline {4.1}机器学习基线}{12}{section.4.1}%
+\contentsline {section}{\numberline {4.2}Transformer 双输入融合模型}{12}{section.4.2}%
+\contentsline {section}{\numberline {4.3}ST-GNN 有向时空因果图}{13}{section.4.3}%
+\contentsline {chapter}{\numberline {第五章\hspace {.3em}}评估体系与防泄漏设计}{14}{chapter.5}%
+\contentsline {section}{\numberline {5.1}时间序列交叉验证}{14}{section.5.1}%
+\contentsline {section}{\numberline {5.2}评估指标}{15}{section.5.2}%
+\contentsline {section}{\numberline {5.3}深度学习预处理防泄漏}{15}{section.5.3}%
+\contentsline {chapter}{\numberline {第六章\hspace {.3em}}实验结果与分析}{16}{chapter.6}%
+\contentsline {section}{\numberline {6.1}交叉验证结果}{16}{section.6.1}%
+\contentsline {section}{\numberline {6.2}OOF 融合}{17}{section.6.2}%
+\contentsline {section}{\numberline {6.3}测试序列提交结果}{17}{section.6.3}%
+\contentsline {section}{\numberline {6.4}结果讨论}{19}{section.6.4}%
+\contentsline {chapter}{\numberline {第七章\hspace {.3em}}工程化复现与部署}{20}{chapter.7}%
+\contentsline {section}{\numberline {7.1}项目模块}{20}{section.7.1}%
+\contentsline {section}{\numberline {7.2}一键运行}{20}{section.7.2}%
+\contentsline {section}{\numberline {7.3}可复现性控制}{21}{section.7.3}%
+\contentsline {chapter}{\numberline {第八章\hspace {.3em}}结论与展望}{22}{chapter.8}%
+\contentsline {chapter}{\numberline {附录 A\hspace {.3em}}附录：关键命令与产物}{23}{appendix.A}%
+\contentsline {section}{\numberline {A.1}报告资产生成}{23}{section.A.1}%
+\contentsline {section}{\numberline {A.2}LaTeX 编译}{23}{section.A.2}%
+\contentsline {section}{\numberline {A.3}核心产物}{23}{section.A.3}%

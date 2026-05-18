@@ -12,3 +12,5 @@ pyproj
 lightgbm
 xgboost
 torch
+matplotlib
+seaborn

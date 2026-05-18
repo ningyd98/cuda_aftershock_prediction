@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import torch
 import joblib
+from sklearn.model_selection import TimeSeriesSplit
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -172,6 +173,174 @@ def time_series_train_val_split(
     return df.iloc[:-n_val].copy(), df.iloc[-n_val:].copy()
 
 
+# ============================================================
+#  OOF 模式 — TimeSeriesSplit + purge，与树模型 CV 逻辑一致
+# ============================================================
+
+def _prepare_features_for_oof(
+    features_path: Path,
+    event_catalog_path: Path,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    """加载并准备 OOF 所需数据。"""
+    df = pd.read_csv(features_path)
+    df[TIME_COL] = pd.to_datetime(df[TIME_COL], utc=True, errors="coerce")
+    df = df.dropna(subset=[TIME_COL, *TARGET_COLS]).sort_values(TIME_COL).reset_index(drop=True)
+
+    event_df = pd.read_csv(event_catalog_path)
+    event_df["time"] = pd.to_datetime(event_df["time"], utc=True, errors="coerce")
+
+    global_cols = select_global_feature_cols(df)
+    return df, event_df, global_cols
+
+
+def _run_oof_for_dl(
+    df: pd.DataFrame,
+    event_df: pd.DataFrame,
+    global_cols: list[str],
+    args: argparse.Namespace,
+) -> pd.DataFrame:
+    """TimeSeriesSplit OOF 预测并输出 oof_predictions.csv。"""
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    train_df = df.sort_values(TIME_COL).reset_index(drop=True)
+    splitter = TimeSeriesSplit(n_splits=args.n_splits)
+    purge_delta = pd.Timedelta(days=float(getattr(args, "purge_days", 30.0)))
+
+    seq_config = SequenceBuildConfig(obs_days=3.0, spatial_radius_km=100.0, max_seq_len=256)
+
+    oof_preds = np.full((len(train_df), len(TARGET_COLS)), np.nan, dtype=float)
+    fold_records: list[dict] = []
+
+    for fold_idx, (train_idx, valid_idx) in enumerate(splitter.split(train_df), start=1):
+        valid_start_time = train_df.loc[valid_idx[0], TIME_COL]
+        purge_cutoff = valid_start_time - purge_delta
+        purge_mask = train_df.loc[train_idx, TIME_COL] <= purge_cutoff
+        train_idx_purged = train_idx[purge_mask.values]
+        if len(train_idx_purged) < max(10, len(train_idx) * 0.3):
+            print(f"  警告: fold {fold_idx} purge 后训练样本仅 {len(train_idx_purged)}，跳过 purge")
+            train_idx_purged = train_idx
+
+        fold_train_df = train_df.iloc[train_idx_purged].copy()
+        fold_valid_df = train_df.iloc[valid_idx].copy()
+
+        # 仅用训练折拟合预处理器
+        preprocessors = fit_dataset_preprocessors(
+            sequence_df=fold_train_df,
+            event_catalog_df=event_df,
+            global_feature_cols=global_cols,
+            target_cols=TARGET_COLS,
+            config=seq_config,
+            scaler_type="robust",
+            add_missing_indicators=True,
+        )
+
+        train_dataset = EarthquakeSequenceDataset(
+            sequence_df=fold_train_df,
+            event_catalog_df=event_df,
+            global_feature_cols=global_cols,
+            target_cols=TARGET_COLS,
+            config=seq_config,
+            preprocessors=preprocessors,
+            fit_preprocessors=False,
+        )
+        valid_dataset = EarthquakeSequenceDataset(
+            sequence_df=fold_valid_df,
+            event_catalog_df=event_df,
+            global_feature_cols=global_cols,
+            target_cols=TARGET_COLS,
+            config=seq_config,
+            preprocessors=preprocessors,
+            fit_preprocessors=False,
+        )
+
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
+                                  collate_fn=earthquake_collate_fn, num_workers=0)
+        valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False,
+                                  collate_fn=earthquake_collate_fn, num_workers=0)
+
+        model = Seq2SeqAftershockPredictor(
+            event_feature_dim=len(train_dataset.event_feature_cols),
+            global_feature_dim=train_dataset.global_feature_dim,
+            d_model=args.d_model,
+            nhead=args.nhead,
+            num_layers=args.num_layers,
+        ).to(device)
+
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+        best_val_loss = float("inf")
+        best_state = None
+
+        for _ in range(args.epochs):
+            train_loss = train_one_epoch(model, train_loader, optimizer, device)
+            # Validate on train scale (log1p), track best model
+            model.eval()
+            val_loss_total, val_count = 0.0, 0
+            with torch.no_grad():
+                for batch in valid_loader:
+                    sx = batch["seq_x"].to(device)
+                    gx = batch["global_x"].to(device)
+                    yy = batch["y"].to(device)
+                    mk = batch["seq_padding_mask"].to(device)
+                    pp = model(sx, gx, mk)
+                    val_loss_total += asymmetric_time_mse_loss(pp, yy).item() * len(yy)
+                    val_count += len(yy)
+            val_loss = val_loss_total / max(val_count, 1)
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            scheduler.step()
+
+        model.load_state_dict(best_state)
+        model.eval()
+
+        # Generate OOF predictions on real-day scale
+        all_preds, all_targets = [], []
+        with torch.no_grad():
+            for batch in valid_loader:
+                sx = batch["seq_x"].to(device)
+                gx = batch["global_x"].to(device)
+                yy = batch["y"].to(device)
+                mk = batch["seq_padding_mask"].to(device)
+                pp = model(sx, gx, mk)
+                all_preds.append(pp.cpu().numpy())
+                all_targets.append(yy.cpu().numpy())
+
+        preds_arr = np.clip(np.concatenate(all_preds, axis=0), a_min=0.0, a_max=None)
+        targets_arr = np.concatenate(all_targets, axis=0)
+
+        # Restore time from log1p to days
+        preds_arr[:, 1] = np.expm1(np.clip(preds_arr[:, 1], 0.0, 50.0))
+        targets_arr[:, 1] = np.expm1(np.clip(targets_arr[:, 1], 0.0, 50.0))
+
+        oof_preds[valid_idx] = preds_arr
+
+        from src.evaluator import calculate_metrics
+        metrics = calculate_metrics(
+            y_true_mag=targets_arr[:, 0], y_pred_mag=preds_arr[:, 0],
+            y_true_time=targets_arr[:, 1], y_pred_time=preds_arr[:, 1],
+            late_weight=args.late_weight,
+        )
+        fold_records.append({
+            "fold": fold_idx, "model": "dl",
+            "train_size": len(train_idx_purged), "valid_size": len(valid_idx),
+            "purge_days": float(getattr(args, "purge_days", 30.0)),
+            "train_start": str(train_df.loc[train_idx_purged[0], TIME_COL])[:10],
+            "train_end": str(train_df.loc[train_idx_purged[-1], TIME_COL])[:10],
+            "valid_start": str(valid_start_time)[:10],
+            "valid_end": str(train_df.loc[valid_idx[-1], TIME_COL])[:10],
+            **metrics,
+        })
+        print(f"  Fold {fold_idx}/{args.n_splits} | MagRMSE={metrics['mag_rmse']:.3f} | TimeRMSE={metrics['time_rmse']:.3f}")
+
+    # Build OOF DataFrame
+    oof_df = train_df[["mainshock_id", TIME_COL, *TARGET_COLS]].copy()
+    oof_df["dl_pred_mag"] = oof_preds[:, 0]
+    oof_df["dl_pred_time"] = oof_preds[:, 1]
+
+    fold_metrics_df = pd.DataFrame(fold_records)
+    return oof_df, fold_metrics_df
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="训练余震预测深度学习模型 (Transformer)")
     parser.add_argument(
@@ -193,6 +362,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save-dir", type=Path, default=PROJECT_ROOT / "data" / "models")
     parser.add_argument("--device", type=str, default="cpu")
+    # OOF 模式参数
+    parser.add_argument("--oof", action="store_true", help="OOF 交叉验证模式")
+    parser.add_argument("--n-splits", type=int, default=5, help="OOF 折数")
+    parser.add_argument("--purge-days", type=float, default=30.0, help="OOF purge 天数")
+    parser.add_argument("--oof-output", type=Path, default=None, help="OOF 预测输出路径")
+    parser.add_argument("--late-weight", type=float, default=2.0, help="预测偏晚惩罚权重")
     return parser.parse_args()
 
 
@@ -201,6 +376,34 @@ def main() -> None:
     set_random_seed(args.seed)
     torch.manual_seed(args.seed)
 
+    # ---- OOF 模式 ----
+    if args.oof:
+        features_path = resolve_project_path(args.features)
+        event_catalog_path = resolve_project_path(args.event_catalog)
+        if not event_catalog_path.exists():
+            event_catalog_path = PROJECT_ROOT / "data" / "raw" / "USGS_Mw6.0_Depth70_1970-2023.csv"
+
+        oof_output = resolve_project_path(args.oof_output) if args.oof_output else (
+            resolve_project_path(args.save_dir) / "dl_oof_predictions.csv"
+        )
+
+        df, event_df, global_cols = _prepare_features_for_oof(features_path, event_catalog_path)
+        print(f"DL OOF 模式: {len(df)} 样本, {len(global_cols)} 全局特征, {args.n_splits} 折")
+
+        oof_df, fold_metrics_df = _run_oof_for_dl(df, event_df, global_cols, args)
+
+        oof_output.parent.mkdir(parents=True, exist_ok=True)
+        oof_df.to_csv(oof_output, index=False, encoding="utf-8")
+        fold_metrics_df.to_csv(oof_output.parent / "dl_cv_metrics.csv", index=False, encoding="utf-8")
+
+        print(f"\nDL OOF 预测已保存: {oof_output}")
+        print(f"DL OOF 平均指标:")
+        metric_cols = [c for c in fold_metrics_df.columns if c not in {"fold","model","train_size","valid_size","purge_days","train_start","train_end","valid_start","valid_end"}]
+        for col in metric_cols:
+            print(f"  {col}: {fold_metrics_df[col].mean():.4f}")
+        return
+
+    # ---- 常规训练模式 ----
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print(f"设备: {device}")
 
