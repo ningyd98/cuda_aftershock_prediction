@@ -22,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
@@ -65,18 +66,15 @@ def load_oof_file(path: Path) -> pd.DataFrame | None:
     return df
 
 
-def merge_all_oof(model_dir: Path) -> tuple[pd.DataFrame, list[str]]:
-    """合并所有可用的 OOF 预测。返回 (merged_df, available_models)。
-
-    优先使用 [mainshock_id, mainshock_time] 作为 join key；
-    若缺失 mainshock_time 则退化为仅用 mainshock_id，并打印 warning。
-    """
-    base_cols = [ID_COL, TIME_COL, *TARGET_COLS]
-    merged: pd.DataFrame | None = None
-    available: list[str] = []
-    has_time_col: bool | None = None
-
-    for model_name, csv_name in MODEL_FILE_MAP.items():
+def discover_oof_inputs(model_dir: Path) -> list[tuple[str, str, pd.DataFrame]]:
+    """先扫描所有 OOF 文件，确认预测列可用，再统一决定 merge key。"""
+    inputs: list[tuple[str, str, pd.DataFrame]] = []
+    for model_name, csv_name in tqdm(
+        MODEL_FILE_MAP.items(),
+        desc="扫描 OOF 文件",
+        unit="model",
+        leave=False,
+    ):
         path = model_dir / csv_name
         df = load_oof_file(path)
         if df is None:
@@ -86,31 +84,61 @@ def merge_all_oof(model_dir: Path) -> tuple[pd.DataFrame, list[str]]:
         if mag_col not in df.columns or time_col not in df.columns:
             print(f"  ⚠ {csv_name}: 缺少预测列 {mag_col}/{time_col}，跳过 {model_name}")
             continue
+        inputs.append((model_name, csv_name, df))
+    return inputs
 
-        file_has_time = TIME_COL in df.columns
-        if not file_has_time and has_time_col is None:
-            print(f"  ⚠ {csv_name}: 缺少 {TIME_COL} 列，将仅使用 {ID_COL} 做 merge")
-        has_time_col = (has_time_col if has_time_col is not None else file_has_time) and file_has_time
 
-        join_keys = [ID_COL] if not file_has_time else [ID_COL, TIME_COL]
-        available_keys = [c for c in join_keys if c in df.columns]
-        keep = available_keys + [c for c in (*TARGET_COLS, mag_col, time_col) if c in df.columns]
-        sub = df[keep].copy()
+def merge_all_oof(model_dir: Path) -> tuple[pd.DataFrame, list[str]]:
+    """合并所有可用的 OOF 预测。返回 (merged_df, available_models)。
 
-        if merged is None:
-            merged = sub
-        else:
-            merged = merged.merge(sub, on=available_keys, how="inner", suffixes=("", f"_dup_{model_name}"))
-        available.append(model_name)
-
-    if merged is None or not available:
+    优先使用 [mainshock_id, mainshock_time] 作为 join key；
+    若缺失 mainshock_time 则退化为仅用 mainshock_id，并打印 warning。
+    """
+    inputs = discover_oof_inputs(model_dir)
+    if not inputs:
         raise FileNotFoundError(f"在 {model_dir} 中未找到任何可用 OOF 文件")
 
+    use_time_key = all(TIME_COL in df.columns for _, _, df in inputs)
+    join_keys = [ID_COL, TIME_COL] if use_time_key else [ID_COL]
+    if not use_time_key:
+        missing_time = [csv_name for _, csv_name, df in inputs if TIME_COL not in df.columns]
+        print(f"  ⚠ 以下 OOF 缺少 {TIME_COL}: {sorted(set(missing_time))}，统一使用 {ID_COL} 合并")
+
+    target_input = next(
+        ((model_name, csv_name, df) for model_name, csv_name, df in inputs if all(c in df.columns for c in TARGET_COLS)),
+        None,
+    )
+    if target_input is None:
+        raise ValueError("可用 OOF 文件均缺少目标列，无法计算融合指标。")
+
+    _, target_csv, target_df = target_input
+    base_keep = list(join_keys)
+    if TIME_COL in target_df.columns and TIME_COL not in base_keep:
+        base_keep.append(TIME_COL)
+    base_keep += TARGET_COLS
+    merged = target_df[base_keep].copy()
+    available: list[str] = []
+
+    for model_name, csv_name, df in tqdm(
+        inputs,
+        desc="合并 OOF 预测",
+        unit="model",
+        leave=False,
+    ):
+        mag_col, time_col = MODEL_PRED_COLS[model_name]
+        keep = list(join_keys) + [mag_col, time_col]
+        sub = df[keep].copy()
+        merged = merged.merge(sub, on=join_keys, how="inner", validate="one_to_one")
+        available.append(model_name)
+
     # 清理 NaN 预测行
+    merged = merged.dropna(subset=TARGET_COLS)
     for model_name in available:
         mag_col, time_col = MODEL_PRED_COLS[model_name]
         merged = merged.dropna(subset=[mag_col, time_col])
 
+    print(f"  基准目标文件: {target_csv}")
+    print(f"  合并键: {join_keys}")
     print(f"  合并 {len(available)} 个模型 ({', '.join(available)})，有效样本: {len(merged)}")
     return merged, available
 
@@ -132,6 +160,7 @@ def search_weights_for_target(
     pred_matrix = merged[pred_cols].to_numpy(dtype=float)
     y_true = merged[TARGET_COLS[target_idx]].to_numpy(dtype=float)
     n_models = len(models)
+    target_name = "震级" if target_idx == 0 else "时间"
 
     def _compute_objective(wvec: np.ndarray) -> float:
         pred = pred_matrix @ wvec
@@ -151,7 +180,12 @@ def search_weights_for_target(
         best_objective = float("inf")
         best_weights = {models[0]: 0.5, models[1]: 0.5}
         grid = np.arange(0.0, 1.0 + grid_step / 2.0, grid_step)
-        for w in grid:
+        for w in tqdm(
+            grid,
+            desc=f"{target_name} 2模型权重搜索",
+            unit="weight",
+            leave=False,
+        ):
             wvec = np.array([w, 1.0 - w])
             obj = _compute_objective(wvec)
             if obj < best_objective:
@@ -181,7 +215,23 @@ def search_weights_for_target(
                         l = n_pts - i - j - k
                         yield np.array([i, j, k, l], dtype=float) / n_pts
 
-    for wvec in _gen_simplex(n_models, grid_step):
+    def _simplex_grid_total(n: int, step: float) -> int | None:
+        """计算当前 3/4 模型单纯形网格点数量，用于准确显示进度。"""
+        n_pts = int(1.0 / step)
+        if n == 3:
+            return (n_pts + 1) * (n_pts + 2) // 2
+        if n == 4:
+            return (n_pts + 1) * (n_pts + 2) * (n_pts + 3) // 6
+        return None
+
+    simplex_iter = tqdm(
+        _gen_simplex(n_models, grid_step),
+        total=_simplex_grid_total(n_models, grid_step),
+        desc=f"{target_name} simplex 权重搜索",
+        unit="weight",
+        leave=False,
+    )
+    for wvec in simplex_iter:
         obj = _compute_objective(wvec)
         if obj < best_objective:
             best_objective = obj
@@ -203,7 +253,7 @@ def compute_ensemble_metrics(
     # 融合预测
     pred_mag = np.zeros(len(merged))
     pred_time = np.zeros(len(merged))
-    for m in available:
+    for m in tqdm(available, desc="计算融合预测", unit="model", leave=False):
         mag_col, time_col = MODEL_PRED_COLS[m]
         pred_mag += merged[mag_col].to_numpy() * mag_weights.get(m, 0.0)
         pred_time += merged[time_col].to_numpy() * time_weights.get(m, 0.0)
@@ -319,7 +369,7 @@ def main() -> None:
     oof_out["ensemble_pred_mag"] = ensemble_pred_mag
     oof_out["ensemble_pred_time"] = ensemble_pred_time
     # 同时保留各单模型预测
-    for m in available:
+    for m in tqdm(available, desc="保存单模型 OOF 列", unit="model", leave=False):
         mag_col, time_col = MODEL_PRED_COLS[m]
         oof_out[f"{m}_pred_mag"] = merged[mag_col]
         oof_out[f"{m}_pred_time"] = merged[time_col]
@@ -335,7 +385,7 @@ def main() -> None:
     print(f"\n{'='*60}")
     print("单模型 vs 融合 (OOF 指标)")
     print(f"{'='*60}")
-    for m in available:
+    for m in tqdm(available, desc="单模型指标对比", unit="model", leave=False):
         mag_col, time_col = MODEL_PRED_COLS[m]
         m_metrics = calculate_metrics(
             y_true_mag=merged[TARGET_COLS[0]].to_numpy(),

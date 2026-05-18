@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import RobustScaler, StandardScaler
+from tqdm import tqdm
 
 from src.evaluator import calculate_metrics
 from src.models import BaselineLGBM
@@ -126,11 +127,18 @@ def time_series_cv_train(
     X = train_df[list(feature_cols)]
     y = train_df[list(target_cols)]
 
-    for fold_idx, (train_idx, valid_idx) in enumerate(splitter.split(X), start=1):
+    fold_iter = tqdm(
+        enumerate(splitter.split(X), start=1),
+        total=n_splits,
+        desc="通用 TimeSeries CV folds",
+        unit="fold",
+    )
+    for fold_idx, (train_idx, valid_idx) in fold_iter:
         X_train_raw = X.iloc[train_idx]
         X_valid_raw = X.iloc[valid_idx]
         y_train_raw = y.iloc[train_idx]
         y_valid = y.iloc[valid_idx]
+        fold_iter.set_postfix(train=len(train_idx), valid=len(valid_idx))
 
         scaler = build_fold_scaler(scaler_type)
         if scaler is None:

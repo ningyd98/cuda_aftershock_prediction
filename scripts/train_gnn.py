@@ -159,8 +159,19 @@ def _run_oof_for_gnn(
     oof_preds = np.full((len(train_df), len(TARGET_COLS)), np.nan, dtype=float)
     fold_records: list[dict] = []
 
-    for fold_idx, (train_idx, valid_idx) in enumerate(splitter.split(train_df), start=1):
+    fold_iter = tqdm(
+        enumerate(splitter.split(train_df), start=1),
+        total=args.n_splits,
+        desc="GNN OOF folds",
+        unit="fold",
+    )
+    for fold_idx, (train_idx, valid_idx) in fold_iter:
         valid_start_time = train_df.loc[valid_idx[0], TIME_COL]
+        fold_iter.set_postfix(
+            train=len(train_idx),
+            valid=len(valid_idx),
+            start=str(valid_start_time)[:10],
+        )
         purge_cutoff = valid_start_time - purge_delta
         purge_mask = train_df.loc[train_idx, TIME_COL] <= purge_cutoff
         train_idx_purged = train_idx[purge_mask.values]
@@ -204,8 +215,20 @@ def _run_oof_for_gnn(
         best_val_loss = float("inf")
         best_state = None
 
-        for _ in range(args.epochs):
-            train_loss = train_one_epoch(model, train_loader, optimizer, device)
+        epoch_iter = tqdm(
+            range(1, args.epochs + 1),
+            desc=f"GNN Fold {fold_idx} epochs",
+            unit="epoch",
+            leave=False,
+        )
+        for _ in epoch_iter:
+            train_loss = train_one_epoch(
+                model,
+                train_loader,
+                optimizer,
+                device,
+                late_weight=args.late_weight,
+            )
             model.eval()
             val_loss_total, val_count = 0.0, 0
             with torch.no_grad():
@@ -223,6 +246,11 @@ def _run_oof_for_gnn(
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            epoch_iter.set_postfix(
+                train_loss=f"{train_loss:.4f}",
+                val_loss=f"{val_loss:.4f}",
+                best=f"{best_val_loss:.4f}",
+            )
             scheduler.step()
 
         if best_state is None:
@@ -236,7 +264,12 @@ def _run_oof_for_gnn(
 
         all_preds, all_targets = [], []
         with torch.no_grad():
-            for batch in valid_loader:
+            for batch in tqdm(
+                valid_loader,
+                desc=f"GNN Fold {fold_idx} OOF预测",
+                unit="batch",
+                leave=False,
+            ):
                 sx = batch["seq_x"].to(device)
                 gx = batch["global_x"].to(device)
                 coords = batch["graph_coords_km"].to(device)
@@ -404,10 +437,22 @@ def main():
     best_mag_rmse = float("inf")
     save_dir = resolve_project_path(args.save_dir)
 
-    for epoch in range(1, args.epochs + 1):
-        train_loss = train_one_epoch(model, train_loader, optimizer, device)
-        val_metrics = evaluate_model(model, val_loader, device)
+    epoch_iter = tqdm(range(1, args.epochs + 1), desc="GNN 训练 epochs", unit="epoch")
+    for epoch in epoch_iter:
+        train_loss = train_one_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            late_weight=args.late_weight,
+        )
+        val_metrics = evaluate_model(model, val_loader, device, late_weight=args.late_weight)
         scheduler.step()
+        epoch_iter.set_postfix(
+            loss=f"{train_loss:.4f}",
+            mag_rmse=f"{val_metrics['mag_rmse']:.3f}",
+            time_rmse=f"{val_metrics['time_rmse']:.3f}",
+        )
 
         if val_metrics["mag_rmse"] < best_mag_rmse:
             best_mag_rmse = val_metrics["mag_rmse"]

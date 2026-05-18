@@ -8,6 +8,7 @@
 #    ./run.sh --skip-download --with-gnn   # 额外训练 ST-GNN
 #    ./run.sh --skip-download --with-deep  # 同时训练 Transformer + ST-GNN
 #    ./run.sh --train-oof-ensemble         # 全模型 OOF 融合（含深度模型）
+#    ./run.sh --no-gating                  # 生成提交时关闭自动门控
 #    ./run.sh --no-install                 # 跳过 pip install（依赖已就绪）
 #    ./run.sh --install                    # 强制重新安装依赖
 #    ./run.sh train-only                   # 只重训模型并重新生成提交
@@ -70,6 +71,7 @@ show_usage() {
   --with-gcmt         下载/使用 Global CMT 震源机制解
   --mock-eval         运行模拟线上评测
   --train-oof-ensemble 全模型 OOF 融合 (树+DL+GNN)，输出双目标权重
+  --no-gating         生成提交时关闭自动两阶段门控
   --reset-ensemble-weights 强制重写 ensemble_weights.json
   --analyze-transformer Transformer 模型分析与可解释性
   --no-install        跳过 pip install
@@ -88,6 +90,7 @@ NO_INSTALL=false
 FORCE_INSTALL=false
 TRAIN_OOF_ENSEMBLE=false
 RESET_ENSEMBLE_WEIGHTS=false
+NO_GATING=false
 
 for arg in "$@"; do
     case "$arg" in
@@ -101,6 +104,7 @@ for arg in "$@"; do
         --with-deep) WITH_DL=true; WITH_GNN=true ;;
         --with-gcmt) WITH_GCMT=true ;;
         --mock-eval) MOCK_EVAL=true ;;
+        --no-gating) NO_GATING=true ;;
         --no-install) NO_INSTALL=true ;;
         --install) FORCE_INSTALL=true ;;
         --train-oof-ensemble) TRAIN_OOF_ENSEMBLE=true ;;
@@ -294,6 +298,13 @@ if [ "$TRAIN_OOF_ENSEMBLE" = true ]; then
     ALL_PREDS="${SUBMISSION_DIR}/all_predictions.csv"
     > "$ALL_PREDS"
     FIRST=true
+    GATING_ARGS=()
+    if [ "$NO_GATING" = false ] && [ -f "${MODEL_DIR}/aftershock_classifier.joblib" ]; then
+        GATING_ARGS=(--use-gating)
+        info "检测到门控分类器，提交推理自动启用 gating"
+    elif [ "$NO_GATING" = true ]; then
+        info "已通过 --no-gating 关闭提交门控"
+    fi
     for test_csv in "$TEST_DIR"/*_eq.csv; do
         SEQ_NAME=$(basename "$test_csv" _eq.csv)
         OUT_CSV="${SUBMISSION_DIR}/${SEQ_NAME}_pred.csv"
@@ -301,6 +312,7 @@ if [ "$TRAIN_OOF_ENSEMBLE" = true ]; then
             --input "$test_csv" \
             --output "$OUT_CSV" \
             --model-dir "$MODEL_DIR" \
+            "${GATING_ARGS[@]}" \
             --allow-rule-fallback 2>/dev/null || true
         if [ -f "$OUT_CSV" ]; then
             if [ "$FIRST" = true ]; then cat "$OUT_CSV" >> "$ALL_PREDS"; FIRST=false
@@ -410,6 +422,13 @@ ALL_PREDS="${SUBMISSION_DIR}/all_predictions.csv"
 rm -f "$ALL_PREDS"
 
 FIRST=true
+GATING_ARGS=()
+if [ "$NO_GATING" = false ] && [ -f "${MODEL_DIR}/aftershock_classifier.joblib" ]; then
+    GATING_ARGS=(--use-gating)
+    info "检测到门控分类器，提交推理自动启用 gating"
+elif [ "$NO_GATING" = true ]; then
+    info "已通过 --no-gating 关闭提交门控"
+fi
 for test_csv in "${test_files[@]}"; do
     seq_name="$(basename "$test_csv" _eq.csv)"
     out_csv="${SUBMISSION_DIR}/${seq_name}_pred.csv"
@@ -417,6 +436,7 @@ for test_csv in "${test_files[@]}"; do
         --input "$test_csv" \
         --output "$out_csv" \
         --model-dir "$MODEL_DIR" \
+        "${GATING_ARGS[@]}" \
         --allow-rule-fallback
 
     if [ "$FIRST" = true ]; then

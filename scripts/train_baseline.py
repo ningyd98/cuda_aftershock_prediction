@@ -9,7 +9,10 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
+from sklearn.utils.class_weight import compute_sample_weight
+from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
@@ -280,11 +283,22 @@ def run_oof_cv(
     }
     fold_records: list[dict] = []
 
-    for fold_idx, (train_idx, valid_idx) in enumerate(splitter.split(X), start=1):
+    fold_iter = tqdm(
+        enumerate(splitter.split(X), start=1),
+        total=args.n_splits,
+        desc="树模型 OOF folds",
+        unit="fold",
+    )
+    for fold_idx, (train_idx, valid_idx) in fold_iter:
         train_end_time = train_df.loc[train_idx[-1], TIME_COL]
         valid_start_time = train_df.loc[valid_idx[0], TIME_COL]
         if valid_start_time <= train_end_time:
             raise RuntimeError("时间序列切分异常：验证集时间未晚于训练集。")
+        fold_iter.set_postfix(
+            train=len(train_idx),
+            valid=len(valid_idx),
+            start=str(valid_start_time)[:10],
+        )
 
         # ---- purge: 剔除训练集中距验证集开始时间不足 purge_days 的样本 ----
         purge_cutoff = valid_start_time - purge_delta
@@ -297,7 +311,14 @@ def run_oof_cv(
             )
             train_idx_purged = train_idx
 
-        for model_name in model_names:
+        model_iter = tqdm(
+            model_names,
+            desc=f"Fold {fold_idx} 模型训练",
+            unit="model",
+            leave=False,
+        )
+        for model_name in model_iter:
+            model_iter.set_postfix(model=model_name)
             model = build_model(model_name, args)
             model.fit(X.iloc[train_idx_purged], y.iloc[train_idx_purged])
             preds = np.asarray(model.predict(X.iloc[valid_idx]), dtype=float)
@@ -399,7 +420,7 @@ def search_tree_ensemble_weights(
     # 独立搜索震级最优权重
     best_mag_rmse = float("inf")
     best_mag_weight = 0.5
-    for baseline_weight in grid:
+    for baseline_weight in tqdm(grid, desc="树融合震级权重搜索", unit="weight", leave=False):
         xgb_weight = 1.0 - baseline_weight
         pred_mag = baseline_weight * baseline_mag + xgb_weight * xgb_mag
         mag_rmse = float(np.sqrt(np.mean((pred_mag - y_mag) ** 2)))
@@ -410,7 +431,7 @@ def search_tree_ensemble_weights(
     # 独立搜索时间最优权重
     best_time_obj = float("inf")
     best_time_weight = 0.5
-    for baseline_weight in grid:
+    for baseline_weight in tqdm(grid, desc="树融合时间权重搜索", unit="weight", leave=False):
         xgb_weight = 1.0 - baseline_weight
         pred_time = baseline_weight * baseline_time + xgb_weight * xgb_time
         time_error = pred_time - y_time
@@ -452,12 +473,123 @@ def train_full_models(
     save_dir = resolve_project_path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     backends: dict[str, str] = {}
-    for model_name in model_names:
+    for model_name in tqdm(model_names, desc="全量树模型训练", unit="model"):
         model = build_model(model_name, args)
         model.fit(df[feature_cols], df[TARGET_COLS])
         joblib.dump(model, save_dir / MODEL_FILE_NAMES[model_name])
         backends[model_name] = getattr(model, "backend", model.__class__.__name__)
     return backends
+
+
+def build_gating_classifier(args: argparse.Namespace):
+    """创建 has-aftershock 门控分类器，返回 (model, backend, fit_uses_sample_weight)。"""
+    try:
+        from lightgbm import LGBMClassifier
+
+        return (
+            LGBMClassifier(
+                n_estimators=min(args.n_estimators, 200),
+                learning_rate=args.learning_rate,
+                random_state=args.seed,
+                verbosity=-1,
+                class_weight="balanced",
+            ),
+            "lightgbm",
+            False,
+        )
+    except ImportError:
+        from sklearn.ensemble import HistGradientBoostingClassifier
+
+        # HistGradientBoostingClassifier 的 class_weight 参数不是所有 sklearn
+        # 版本都支持；用 sample_weight 实现 balanced 权重更稳。
+        return (
+            HistGradientBoostingClassifier(
+                max_iter=min(args.n_estimators, 200),
+                learning_rate=args.learning_rate,
+                random_state=args.seed,
+            ),
+            "sklearn_hist_gradient_boosting",
+            True,
+        )
+
+
+def fit_gating_classifier(model, X: pd.DataFrame, y: pd.Series, use_sample_weight: bool):
+    """按需传入 balanced sample_weight 训练分类器。"""
+    if use_sample_weight:
+        sample_weight = compute_sample_weight(class_weight="balanced", y=y)
+        return model.fit(X, y, sample_weight=sample_weight)
+    return model.fit(X, y)
+
+
+def positive_class_probability(model, X: pd.DataFrame) -> np.ndarray:
+    """提取 has_aftershock=1 的概率，兼容单类模型。"""
+    if not hasattr(model, "predict_proba"):
+        scores = np.asarray(model.decision_function(X), dtype=float)
+        return 1.0 / (1.0 + np.exp(-scores))
+
+    probs = np.asarray(model.predict_proba(X), dtype=float)
+    classes = list(getattr(model, "classes_", []))
+    if 1 in classes:
+        return probs[:, classes.index(1)]
+    if True in classes:
+        return probs[:, classes.index(True)]
+    if len(classes) == 1 and classes[0] in (0, False):
+        return np.zeros(len(X), dtype=float)
+    if probs.ndim == 2 and probs.shape[1] >= 2:
+        return probs[:, 1]
+    raise RuntimeError("分类器无法提供 has_aftershock=1 的概率。")
+
+
+def fbeta_score_from_counts(tp: int, fp: int, fn: int, beta: float = 2.0) -> float:
+    """根据混淆矩阵计数计算 F-beta。"""
+    beta2 = beta**2
+    denom = (1.0 + beta2) * tp + beta2 * fn + fp
+    return 0.0 if denom == 0 else float((1.0 + beta2) * tp / denom)
+
+
+def search_gating_threshold(
+    y_true: np.ndarray,
+    prob: np.ndarray,
+    beta: float = 2.0,
+    step: float = 0.01,
+) -> tuple[float, dict]:
+    """在 OOF 概率上搜索门控阈值，默认用 F2 偏重召回。"""
+    valid = np.isfinite(prob)
+    y = y_true[valid].astype(int)
+    p = prob[valid]
+    if len(y) == 0:
+        return 0.5, {"f2": np.nan, "precision": np.nan, "recall": np.nan, "accuracy": np.nan}
+
+    thresholds = np.arange(step, 1.0, step)
+    best_threshold = 0.5
+    best_fbeta = -1.0
+    best_stats: dict = {}
+    for threshold in tqdm(thresholds, desc="门控阈值 OOF 搜索", unit="threshold", leave=False):
+        pred = (p >= threshold).astype(int)
+        tp = int(((pred == 1) & (y == 1)).sum())
+        fp = int(((pred == 1) & (y == 0)).sum())
+        tn = int(((pred == 0) & (y == 0)).sum())
+        fn = int(((pred == 0) & (y == 1)).sum())
+        precision = tp / max(tp + fp, 1)
+        recall = tp / max(tp + fn, 1)
+        accuracy = (tp + tn) / max(len(y), 1)
+        fbeta = fbeta_score_from_counts(tp, fp, fn, beta=beta)
+
+        # 同分时取更低阈值，减少 false negative 风险。
+        if fbeta > best_fbeta + 1e-12:
+            best_fbeta = fbeta
+            best_threshold = float(threshold)
+            best_stats = {
+                "f2": float(fbeta),
+                "precision": float(precision),
+                "recall": float(recall),
+                "accuracy": float(accuracy),
+                "tp": tp,
+                "fp": fp,
+                "tn": tn,
+                "fn": fn,
+            }
+    return best_threshold, best_stats
 
 
 def train_two_stage_classifier(
@@ -468,16 +600,14 @@ def train_two_stage_classifier(
     """
     训练二阶段零膨胀门控分类器。
 
-    分类标签: has_target_aftershock (若不存在则 fallback 到 target_max_mag > 0)
+    分类标签: has_target_aftershock (若不存在则 fallback 到 target_max_mag.notna())
     使用与回归器相同的 feature_cols。
     保存 classifier_meta.json 和 classifier_model.joblib。
     """
     save_dir = resolve_project_path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    from sklearn.model_selection import cross_val_score
-
-    df_cls = raw_df.copy()
+    df_cls = add_derived_features(raw_df.copy())
     # 确定分类标签
     if "has_target_aftershock" in df_cls.columns:
         y_cls = df_cls["has_target_aftershock"].astype(int)
@@ -490,49 +620,94 @@ def train_two_stage_classifier(
     pos_rate = float(y_cls.mean())
     print(f"\n两阶段分类器: positive_rate={pos_rate:.4f}, 正样本数={y_cls.sum()}/{len(y_cls)}")
 
+    df_cls[TIME_COL] = pd.to_datetime(df_cls[TIME_COL], utc=True, errors="coerce", format="mixed")
+    valid_time_mask = df_cls[TIME_COL].notna()
+    df_cls = df_cls.loc[valid_time_mask].sort_values(TIME_COL).reset_index(drop=True)
+    y_cls = y_cls.loc[valid_time_mask].reset_index(drop=True)
+
+    for col in feature_cols:
+        if col not in df_cls.columns:
+            df_cls[col] = np.nan
     X_cls = df_cls[feature_cols].fillna(0.0)
     for col in X_cls.columns:
         if pd.api.types.is_bool_dtype(X_cls[col]):
             X_cls[col] = X_cls[col].astype(int)
 
-    # 尝试 LightGBM 分类器，回退到 sklearn
-    try:
-        from lightgbm import LGBMClassifier
-        clf = LGBMClassifier(
-            n_estimators=min(args.n_estimators, 200),
-            learning_rate=args.learning_rate,
-            random_state=args.seed,
-            verbosity=-1,
-            class_weight="balanced",
-        )
-        clf_backend = "lightgbm"
-    except ImportError:
-        from sklearn.ensemble import HistGradientBoostingClassifier
-        clf = HistGradientBoostingClassifier(
-            max_iter=min(args.n_estimators, 200),
-            learning_rate=args.learning_rate,
-            random_state=args.seed,
-            class_weight="balanced",
-        )
-        clf_backend = "sklearn"
+    clf_probe, clf_backend, _ = build_gating_classifier(args)
+    del clf_probe
 
-    # 简单 CV 评估
-    try:
-        cv_scores = cross_val_score(clf, X_cls, y_cls, cv=min(args.n_splits, 5), scoring="roc_auc")
-        cv_auc = float(cv_scores.mean())
-        print(f"  CV AUC (roc): {cv_auc:.4f} (+/- {cv_scores.std():.4f})")
-    except Exception:
+    splitter = TimeSeriesSplit(n_splits=args.n_splits)
+    purge_delta = pd.Timedelta(days=float(getattr(args, "purge_days", 30.0)))
+    oof_prob = np.full(len(df_cls), np.nan, dtype=float)
+    fold_iter = tqdm(
+        enumerate(splitter.split(X_cls), start=1),
+        total=args.n_splits,
+        desc="门控分类器 OOF folds",
+        unit="fold",
+    )
+    for fold_idx, (train_idx, valid_idx) in fold_iter:
+        valid_start_time = df_cls.loc[valid_idx[0], TIME_COL]
+        fold_iter.set_postfix(
+            train=len(train_idx),
+            valid=len(valid_idx),
+            start=str(valid_start_time)[:10],
+        )
+        purge_cutoff = valid_start_time - purge_delta
+        purge_mask = df_cls.loc[train_idx, TIME_COL] <= purge_cutoff
+        train_idx_purged = train_idx[purge_mask.values]
+        if len(train_idx_purged) < max(20, len(train_idx) * 0.3):
+            train_idx_purged = train_idx
+
+        y_train = y_cls.iloc[train_idx_purged]
+        if y_train.nunique() < 2:
+            oof_prob[valid_idx] = float(y_train.mean())
+            continue
+
+        clf_fold, _, use_sample_weight = build_gating_classifier(args)
+        fit_gating_classifier(
+            clf_fold,
+            X_cls.iloc[train_idx_purged],
+            y_train,
+            use_sample_weight=use_sample_weight,
+        )
+        oof_prob[valid_idx] = positive_class_probability(clf_fold, X_cls.iloc[valid_idx])
+
+    valid_oof = np.isfinite(oof_prob)
+    if valid_oof.any() and y_cls.loc[valid_oof].nunique() == 2:
+        cv_auc = float(roc_auc_score(y_cls.loc[valid_oof], oof_prob[valid_oof]))
+    else:
         cv_auc = None
+    threshold, threshold_stats = search_gating_threshold(
+        y_cls.to_numpy(dtype=int),
+        oof_prob,
+        beta=2.0,
+        step=0.01,
+    )
+    print(f"  OOF AUC: {cv_auc:.4f}" if cv_auc is not None else "  OOF AUC: N/A")
+    print(f"  OOF F2 最优阈值: {threshold:.2f}, F2={threshold_stats.get('f2', np.nan):.4f}")
 
     # 全量训练
-    clf.fit(X_cls, y_cls)
+    clf, clf_backend, use_sample_weight = build_gating_classifier(args)
+    fit_gating_classifier(clf, X_cls, y_cls, use_sample_weight=use_sample_weight)
     joblib.dump(clf, save_dir / "aftershock_classifier.joblib")
+
+    classifier_oof = df_cls[["mainshock_id", TIME_COL]].copy()
+    classifier_oof["has_target_aftershock"] = y_cls.astype(int)
+    classifier_oof["oof_prob_has_aftershock"] = oof_prob
+    classifier_oof["oof_pred_has_aftershock"] = (oof_prob >= threshold).astype(float)
+    classifier_oof.loc[~np.isfinite(oof_prob), "oof_pred_has_aftershock"] = np.nan
+    classifier_oof.to_csv(save_dir / "classifier_oof_predictions.csv", index=False, encoding="utf-8")
 
     meta = {
         "positive_rate": round(pos_rate, 4),
         "feature_cols": feature_cols,
-        "threshold": 0.5,
-        "cv_auc": round(cv_auc, 4) if cv_auc is not None else None,
+        "threshold": round(float(threshold), 4),
+        "threshold_objective": "f2",
+        "oof_auc": round(cv_auc, 4) if cv_auc is not None else None,
+        "oof_f2": round(float(threshold_stats.get("f2", np.nan)), 4),
+        "oof_precision": round(float(threshold_stats.get("precision", np.nan)), 4),
+        "oof_recall": round(float(threshold_stats.get("recall", np.nan)), 4),
+        "oof_accuracy": round(float(threshold_stats.get("accuracy", np.nan)), 4),
         "backend": clf_backend,
     }
     with (save_dir / "classifier_meta.json").open("w", encoding="utf-8") as f:
@@ -626,6 +801,7 @@ def main() -> None:
     raw_df = pd.read_csv(data_path)
     # 回归训练用正样本子集
     df = prepare_regression_subset(raw_df)
+    df = prepare_training_frame(df)
     df = add_derived_features(df)
     feature_cols = select_feature_columns(df)
     model_names = requested_model_names(args.model_type)

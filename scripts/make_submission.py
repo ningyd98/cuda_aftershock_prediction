@@ -444,6 +444,7 @@ def predict_with_dl(
     try:
         import torch
         configure_torch_inference_threads(torch)
+        _dev = get_torch_device(device)
 
         with open(dl_meta_path, "r") as f:
             dl_meta = json.load(f)
@@ -656,8 +657,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--gating-threshold",
         type=float,
-        default=0.5,
-        help="分类概率阈值 (低于此值判定为无余震)",
+        default=None,
+        help="分类概率阈值；默认读取 classifier_meta.json，缺失时回退 0.5",
     )
     parser.add_argument(
         "--classifier-model",
@@ -678,6 +679,41 @@ def parse_args() -> argparse.Namespace:
         help="分类器判定无余震时输出的预测时间 (天)",
     )
     return parser.parse_args()
+
+
+def load_classifier_meta(classifier_path: Path) -> dict:
+    """读取门控分类器元信息，缺失时返回空字典。"""
+    meta_path = classifier_path.parent / "classifier_meta.json"
+    if not meta_path.exists():
+        return {}
+    with meta_path.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def get_positive_probability(classifier, X: pd.DataFrame) -> float | None:
+    """稳健提取 has_aftershock=1 的概率，兼容单类分类器。"""
+    if hasattr(classifier, "predict_proba"):
+        probs = np.asarray(classifier.predict_proba(X), dtype=float)
+        classes = getattr(classifier, "classes_", None)
+        if classes is None:
+            if probs.ndim == 2 and probs.shape[1] >= 2:
+                return float(probs[0, 1])
+            return None
+
+        classes = list(classes)
+        if 1 in classes:
+            return float(probs[0, classes.index(1)])
+        if True in classes:
+            return float(probs[0, classes.index(True)])
+        if len(classes) == 1 and classes[0] in (0, False):
+            return 0.0
+        return None
+
+    if hasattr(classifier, "decision_function"):
+        score = np.asarray(classifier.decision_function(X), dtype=float).reshape(-1)[0]
+        return float(1.0 / (1.0 + np.exp(-score)))
+
+    return None
 
 
 def main() -> None:
@@ -719,6 +755,7 @@ def main() -> None:
     mainshock_id = str(feature_df.loc[0, "mainshock_id"])
     mainshock_mag = float(feature_df.loc[0, "mainshock_mag"])
     early_count = int(len(early_events))
+    enriched_df = add_derived_features(feature_df.copy())
 
     # ─── Two-stage Gating ───
     gated_no_aftershock = False
@@ -731,27 +768,32 @@ def main() -> None:
         )
         if classifier_path.exists():
             clf = joblib.load(classifier_path)
-            # Build feature matrix for classifier
-            try:
-                feature_cols_cls = load_feature_cols(feature_cols_path)
-            except Exception:
-                # classifier may have been trained with different feature set, try classifier_meta
-                cls_meta_path = classifier_path.parent / "classifier_meta.json"
-                if cls_meta_path.exists():
-                    with open(cls_meta_path, "r") as f:
-                        cls_meta = json.load(f)
-                    feature_cols_cls = cls_meta.get("feature_cols", [])
-                else:
+            cls_meta = load_classifier_meta(classifier_path)
+            threshold = (
+                float(args.gating_threshold)
+                if args.gating_threshold is not None
+                else float(cls_meta.get("threshold", 0.5))
+            )
+            feature_cols_cls = cls_meta.get("feature_cols")
+            if not feature_cols_cls:
+                try:
+                    feature_cols_cls = load_feature_cols(feature_cols_path)
+                except Exception:
                     feature_cols_cls = []
             if feature_cols_cls:
-                X_gate = make_model_matrix(feature_df, feature_cols_cls)
-                prob_has_aftershock = float(clf.predict_proba(X_gate)[0, 1])
+                X_gate = make_model_matrix(enriched_df, feature_cols_cls)
+                prob_has_aftershock = get_positive_probability(clf, X_gate)
             else:
-                prob_has_aftershock = 0.5  # fallback
-            print(f"  分类器 prob_has_aftershock: {prob_has_aftershock:.4f}")
-            if prob_has_aftershock < args.gating_threshold:
-                gated_no_aftershock = True
-                print(f"  触发 gating: 判定无余震 (prob < {args.gating_threshold})")
+                prob_has_aftershock = None
+
+            if prob_has_aftershock is None:
+                print("  ⚠ 分类器无法输出正类概率，跳过 gating")
+            else:
+                print(f"  分类器 prob_has_aftershock: {prob_has_aftershock:.4f}")
+                print(f"  gating threshold: {threshold:.4f}")
+                if prob_has_aftershock < threshold:
+                    gated_no_aftershock = True
+                    print(f"  触发 gating: 判定无余震 (prob < {threshold:.4f})")
         else:
             print(f"  ⚠ 分类器不存在: {classifier_path}，跳过 gating")
 
@@ -762,9 +804,8 @@ def main() -> None:
     else:
         try:
             feature_cols = load_feature_cols(feature_cols_path)
-            enriched_df = add_derived_features(feature_df.copy())
             check_feature_consistency(enriched_df, feature_cols)
-            X = make_model_matrix(feature_df, feature_cols)
+            X = make_model_matrix(enriched_df, feature_cols)
             weights = load_ensemble_weights(ensemble_weights_path)
 
             # 提取双目标权重
@@ -791,7 +832,7 @@ def main() -> None:
             if (dl_weight_mag > 0 or dl_weight_time > 0):
                 dl_model_path = baseline_model_path.parent / "dl_model.pt"
                 dl_meta_path = baseline_model_path.parent / "dl_meta.json"
-                dl_pred = predict_with_dl(dl_model_path, dl_meta_path, event_df, feature_df)
+                dl_pred = predict_with_dl(dl_model_path, dl_meta_path, event_df, enriched_df)
                 if dl_pred is not None:
                     model_preds["dl"] = dl_pred
 
@@ -800,7 +841,7 @@ def main() -> None:
             if (gnn_weight_mag > 0 or gnn_weight_time > 0):
                 gnn_model_path = baseline_model_path.parent / "gnn_model.pt"
                 gnn_meta_path = baseline_model_path.parent / "gnn_meta.json"
-                gnn_pred = predict_with_gnn(gnn_model_path, gnn_meta_path, event_df, feature_df)
+                gnn_pred = predict_with_gnn(gnn_model_path, gnn_meta_path, event_df, enriched_df)
                 if gnn_pred is not None:
                     model_preds["gnn"] = gnn_pred
 
