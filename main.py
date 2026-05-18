@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 SCRIPT_MAP = {
+    "analyze-transformer": PROJECT_ROOT / "scripts" / "analyze_transformer.py",
     "build-sequences": PROJECT_ROOT / "src" / "data_loader.py",
     "build-features": PROJECT_ROOT / "scripts" / "build_features.py",
     "download-usgs": PROJECT_ROOT / "scripts" / "download_usgs.py",
@@ -20,6 +21,7 @@ SCRIPT_MAP = {
     "mock-evaluation": PROJECT_ROOT / "scripts" / "mock_evaluation.py",
     "train-baseline": PROJECT_ROOT / "scripts" / "train_baseline.py",
     "train-dl": PROJECT_ROOT / "scripts" / "train_dl.py",
+    "train-ensemble": PROJECT_ROOT / "scripts" / "train_ensemble.py",
     "train-gnn": PROJECT_ROOT / "scripts" / "train_gnn.py",
 }
 

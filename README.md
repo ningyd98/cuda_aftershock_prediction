@@ -170,6 +170,74 @@ python scripts/train_ensemble.py --model-dir data/models
 重点关注 OOF 指标，而非训练集指标。OOF 指标直接反映
 模型对"未见过的未来地震"的预测能力。
 
+## Transformer 深度学习方案
+
+### 架构
+
+```
+┌─────────────────────────────────────────────────────┐
+│                 Transformer 预测器                    │
+│                                                      │
+│  早期余震序列 (N×7) ──▶ EventProjection ──▶ PE       │
+│  [dt, log_dt, x, y, dist, depth, mag]    │          │
+│                                           ▼          │
+│                              TransformerEncoder ×3   │
+│                              (d_model=128, nhead=4)   │
+│                                           │          │
+│                                           ▼          │
+│  全局手工特征 (D_global) ──▶ MLP Encoder  │          │
+│  [G-R/Omori/ETAS/构造...]                │          │
+│                                           ▼          │
+│                              Concat ──▶ FusionMLP    │
+│                                           │          │
+│                                           ▼          │
+│                              [pred_mag, pred_time]    │
+└─────────────────────────────────────────────────────┘
+```
+
+- **事件特征维**: 7 (时间差、对数时间差、相对经纬度 (km)、距离、深度、震级)
+- **位置编码**: 正弦位置编码 (sinusoidal PE)，支持最大 256 时间步
+- **空序列处理**: 对无早期余震的主震，自动产生零向量表示
+- **时间目标**: 训练时使用 log1p 压缩长尾分布，推理时还原为真实天数
+- **预处理器**: RobustScaler + 领域先验填充 (b=1.0, p=1.0, c=0.05)
+
+### 训练
+
+```bash
+# 常规训练 (80% train / 20% val)
+python scripts/train_dl.py \
+    --features data/processed/advanced_features.csv \
+    --event-catalog data/raw/USGS_Mw4.0_Depth70_1970-2023.csv \
+    --epochs 50 --batch-size 32 --lr 1e-3 \
+    --d-model 128 --nhead 4 --num-layers 3 \
+    --save-dir data/models
+
+# OOF 交叉验证 (用于融合)
+python scripts/train_dl.py --oof --n-splits 5 --purge-days 30 \
+    --save-dir data/models
+```
+
+### 分析与可解释性
+
+```bash
+# 单条序列分析 + 事件贡献度
+python scripts/analyze_transformer.py \
+    --input data/test_sequences/20230206011734_eq.csv \
+    --model-dir data/models \
+    --event-contributions
+
+# 批量分析所有测试序列
+python scripts/analyze_transformer.py \
+    --input-dir data/test_sequences \
+    --model-dir data/models \
+    --output-dir reports/transformer_analysis
+```
+
+输出 JSON 包含:
+- Transformer 预测 (pred_mag, pred_time)
+- 各早期余震事件对预测的贡献度排名
+- 注意力权重矩阵 (可选 `--extract-attention`)
+
 ## 关键设计
 
 | 维度 | 方案 |

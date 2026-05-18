@@ -49,6 +49,7 @@ show_usage() {
   --with-gcmt         下载/使用 Global CMT 震源机制解
   --mock-eval         运行模拟线上评测
   --train-oof-ensemble 全模型 OOF 融合 (树+DL+GNN)，输出双目标权重
+  --analyze-transformer Transformer 模型分析与可解释性
   --no-install        跳过 pip install
   --install           强制重新安装依赖
   train-only          只重训模型并重新生成提交

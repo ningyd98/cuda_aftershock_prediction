@@ -45,6 +45,38 @@ def seismic_moment_from_mw(magnitudes: Iterable[float] | np.ndarray) -> np.ndarr
     return 10 ** (1.5 * mags + 4.8)
 
 
+def get_torch_device(device_str: str = "auto") -> "torch.device":
+    """
+    按优先级自动选择 PyTorch 设备: CUDA → MPS → CPU。
+
+    可通过 device_str 显式指定 ('cuda', 'mps', 'cpu', 'auto')。
+
+    Usage:
+        device = get_torch_device()         # auto-detect
+        device = get_torch_device("mps")    # force MPS
+        device = get_torch_device("cpu")    # force CPU
+    """
+    import torch
+
+    normalized = device_str.strip().lower()
+    if normalized in ("cuda", "gpu"):
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        raise RuntimeError("CUDA 不可用，无法使用 --device cuda")
+    if normalized == "mps":
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        raise RuntimeError("MPS 不可用，无法使用 --device mps")
+    if normalized == "cpu":
+        return torch.device("cpu")
+    # auto: CUDA → MPS → CPU
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 def gardner_knopoff_windows() -> dict[tuple[float, float], tuple[float, float]]:
     """
     Gardner & Knopoff (1974) 余震时空窗参数。
