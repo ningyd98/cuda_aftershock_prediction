@@ -647,6 +647,36 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="模型产物缺失或预测失败时允许规则兜底输出",
     )
+    # Two-stage gating parameters
+    parser.add_argument(
+        "--use-gating",
+        action="store_true",
+        help="启用两阶段零膨胀门控预测",
+    )
+    parser.add_argument(
+        "--gating-threshold",
+        type=float,
+        default=0.5,
+        help="分类概率阈值 (低于此值判定为无余震)",
+    )
+    parser.add_argument(
+        "--classifier-model",
+        type=Path,
+        default=None,
+        help="aftershock_classifier.joblib 路径",
+    )
+    parser.add_argument(
+        "--no-aftershock-mag",
+        type=float,
+        default=0.0,
+        help="分类器判定无余震时输出的预测震级",
+    )
+    parser.add_argument(
+        "--no-aftershock-time",
+        type=float,
+        default=0.0,
+        help="分类器判定无余震时输出的预测时间 (天)",
+    )
     return parser.parse_args()
 
 
@@ -690,91 +720,138 @@ def main() -> None:
     mainshock_mag = float(feature_df.loc[0, "mainshock_mag"])
     early_count = int(len(early_events))
 
-    try:
-        feature_cols = load_feature_cols(feature_cols_path)
-        enriched_df = add_derived_features(feature_df.copy())
-        check_feature_consistency(enriched_df, feature_cols)
-        X = make_model_matrix(feature_df, feature_cols)
-        weights = load_ensemble_weights(ensemble_weights_path)
-
-        # 提取双目标权重
-        mag_weights = weights.get("mag", weights)  # compat: 旧格式是单层 dict
-        time_weights = weights.get("time", weights)
-
-        # 各模型独立预测，不在 mag/time 间交叉
-        model_preds: dict[str, np.ndarray] = {}
-
-        baseline_weight_mag = max(float(mag_weights.get("baseline", 1.0)), 0.0)
-        baseline_weight_time = max(float(time_weights.get("baseline", 1.0)), 0.0)
-        if (baseline_weight_mag > 0 or baseline_weight_time > 0) and baseline_model_path.exists():
-            model_preds["baseline"] = predict_with_baseline(baseline_model_path, X)
-
-        xgb_weight_mag = max(float(mag_weights.get("xgboost", 0.0)), 0.0)
-        xgb_weight_time = max(float(time_weights.get("xgboost", 0.0)), 0.0)
-        if (xgb_weight_mag > 0 or xgb_weight_time > 0):
-            xgb_model_path = baseline_model_path.parent / "xgboost_model.joblib"
-            if xgb_model_path.exists():
-                model_preds["xgboost"] = predict_with_baseline(xgb_model_path, X)
-
-        dl_weight_mag = max(float(mag_weights.get("dl", 0.0)), 0.0)
-        dl_weight_time = max(float(time_weights.get("dl", 0.0)), 0.0)
-        if (dl_weight_mag > 0 or dl_weight_time > 0):
-            dl_model_path = baseline_model_path.parent / "dl_model.pt"
-            dl_meta_path = baseline_model_path.parent / "dl_meta.json"
-            dl_pred = predict_with_dl(dl_model_path, dl_meta_path, event_df, feature_df)
-            if dl_pred is not None:
-                model_preds["dl"] = dl_pred
-
-        gnn_weight_mag = max(float(mag_weights.get("gnn", 0.0)), 0.0)
-        gnn_weight_time = max(float(time_weights.get("gnn", 0.0)), 0.0)
-        if (gnn_weight_mag > 0 or gnn_weight_time > 0):
-            gnn_model_path = baseline_model_path.parent / "gnn_model.pt"
-            gnn_meta_path = baseline_model_path.parent / "gnn_meta.json"
-            gnn_pred = predict_with_gnn(gnn_model_path, gnn_meta_path, event_df, feature_df)
-            if gnn_pred is not None:
-                model_preds["gnn"] = gnn_pred
-
-        if not model_preds:
-            raise FileNotFoundError("没有任何可用模型参与融合。")
-
-        # 震级和时间分别加权融合
-        fused_mag = 0.0
-        fused_time = 0.0
-        total_mag_w = 0.0
-        total_time_w = 0.0
-        for name, pred in model_preds.items():
-            w_mag = max(float(mag_weights.get(name, 0.0)), 0.0)
-            w_time = max(float(time_weights.get(name, 0.0)), 0.0)
-            if w_mag > 0:
-                fused_mag += pred[0, 0] * w_mag
-                total_mag_w += w_mag
-            if w_time > 0:
-                fused_time += pred[0, 1] * w_time
-                total_time_w += w_time
-
-        pred_mag = fused_mag / total_mag_w if total_mag_w > 0 else next(iter(model_preds.values()))[0, 0]
-        pred_time = fused_time / total_time_w if total_time_w > 0 else next(iter(model_preds.values()))[0, 1]
-        pred = np.array([[pred_mag, pred_time]], dtype=float)
-
-        loaded_info = ", ".join(
-            f"{n}(m:{mag_weights.get(n,0):.3f}/t:{time_weights.get(n,0):.3f})"
-            for n in model_preds
+    # ─── Two-stage Gating ───
+    gated_no_aftershock = False
+    prob_has_aftershock = None
+    if args.use_gating:
+        classifier_path = (
+            resolve_project_path(args.classifier_model)
+            if args.classifier_model is not None
+            else model_dir / "aftershock_classifier.joblib"
         )
-        print(f"   双目标融合: {loaded_info}")
-    except Exception as exc:
-        if not args.allow_rule_fallback:
-            raise RuntimeError(
-                "模型推理失败。请确认 baseline_model.joblib、feature_cols.json "
-                "和 ensemble_weights.json 已生成；或加 --allow-rule-fallback。"
-            ) from exc
-        print(f"警告：模型推理失败，使用规则兜底。原因: {exc}")
-        pred = rule_fallback_prediction(mainshock_mag, early_count)
+        if classifier_path.exists():
+            clf = joblib.load(classifier_path)
+            # Build feature matrix for classifier
+            try:
+                feature_cols_cls = load_feature_cols(feature_cols_path)
+            except Exception:
+                # classifier may have been trained with different feature set, try classifier_meta
+                cls_meta_path = classifier_path.parent / "classifier_meta.json"
+                if cls_meta_path.exists():
+                    with open(cls_meta_path, "r") as f:
+                        cls_meta = json.load(f)
+                    feature_cols_cls = cls_meta.get("feature_cols", [])
+                else:
+                    feature_cols_cls = []
+            if feature_cols_cls:
+                X_gate = make_model_matrix(feature_df, feature_cols_cls)
+                prob_has_aftershock = float(clf.predict_proba(X_gate)[0, 1])
+            else:
+                prob_has_aftershock = 0.5  # fallback
+            print(f"  分类器 prob_has_aftershock: {prob_has_aftershock:.4f}")
+            if prob_has_aftershock < args.gating_threshold:
+                gated_no_aftershock = True
+                print(f"  触发 gating: 判定无余震 (prob < {args.gating_threshold})")
+        else:
+            print(f"  ⚠ 分类器不存在: {classifier_path}，跳过 gating")
 
-    predicted_mag, predicted_time = postprocess_prediction(
-        pred,
-        mainshock_mag=mainshock_mag,
-        early_count=early_count,
-    )
+    if gated_no_aftershock:
+        predicted_mag = args.no_aftershock_mag
+        predicted_time = args.no_aftershock_time
+        print(f"  预测来源: classifier_gate → mag={predicted_mag}, time={predicted_time}d")
+    else:
+        try:
+            feature_cols = load_feature_cols(feature_cols_path)
+            enriched_df = add_derived_features(feature_df.copy())
+            check_feature_consistency(enriched_df, feature_cols)
+            X = make_model_matrix(feature_df, feature_cols)
+            weights = load_ensemble_weights(ensemble_weights_path)
+
+            # 提取双目标权重
+            mag_weights = weights.get("mag", weights)
+            time_weights = weights.get("time", weights)
+
+            # 各模型独立预测，不在 mag/time 间交叉
+            model_preds: dict[str, np.ndarray] = {}
+
+            baseline_weight_mag = max(float(mag_weights.get("baseline", 1.0)), 0.0)
+            baseline_weight_time = max(float(time_weights.get("baseline", 1.0)), 0.0)
+            if (baseline_weight_mag > 0 or baseline_weight_time > 0) and baseline_model_path.exists():
+                model_preds["baseline"] = predict_with_baseline(baseline_model_path, X)
+
+            xgb_weight_mag = max(float(mag_weights.get("xgboost", 0.0)), 0.0)
+            xgb_weight_time = max(float(time_weights.get("xgboost", 0.0)), 0.0)
+            if (xgb_weight_mag > 0 or xgb_weight_time > 0):
+                xgb_model_path = baseline_model_path.parent / "xgboost_model.joblib"
+                if xgb_model_path.exists():
+                    model_preds["xgboost"] = predict_with_baseline(xgb_model_path, X)
+
+            dl_weight_mag = max(float(mag_weights.get("dl", 0.0)), 0.0)
+            dl_weight_time = max(float(time_weights.get("dl", 0.0)), 0.0)
+            if (dl_weight_mag > 0 or dl_weight_time > 0):
+                dl_model_path = baseline_model_path.parent / "dl_model.pt"
+                dl_meta_path = baseline_model_path.parent / "dl_meta.json"
+                dl_pred = predict_with_dl(dl_model_path, dl_meta_path, event_df, feature_df)
+                if dl_pred is not None:
+                    model_preds["dl"] = dl_pred
+
+            gnn_weight_mag = max(float(mag_weights.get("gnn", 0.0)), 0.0)
+            gnn_weight_time = max(float(time_weights.get("gnn", 0.0)), 0.0)
+            if (gnn_weight_mag > 0 or gnn_weight_time > 0):
+                gnn_model_path = baseline_model_path.parent / "gnn_model.pt"
+                gnn_meta_path = baseline_model_path.parent / "gnn_meta.json"
+                gnn_pred = predict_with_gnn(gnn_model_path, gnn_meta_path, event_df, feature_df)
+                if gnn_pred is not None:
+                    model_preds["gnn"] = gnn_pred
+
+            if not model_preds:
+                raise FileNotFoundError("没有任何可用模型参与融合。")
+
+            # 震级和时间分别加权融合
+            fused_mag = 0.0
+            fused_time = 0.0
+            total_mag_w = 0.0
+            total_time_w = 0.0
+            for name, pred in model_preds.items():
+                w_mag = max(float(mag_weights.get(name, 0.0)), 0.0)
+                w_time = max(float(time_weights.get(name, 0.0)), 0.0)
+                if w_mag > 0:
+                    fused_mag += pred[0, 0] * w_mag
+                    total_mag_w += w_mag
+                if w_time > 0:
+                    fused_time += pred[0, 1] * w_time
+                    total_time_w += w_time
+
+            pred_mag = fused_mag / total_mag_w if total_mag_w > 0 else next(iter(model_preds.values()))[0, 0]
+            pred_time = fused_time / total_time_w if total_time_w > 0 else next(iter(model_preds.values()))[0, 1]
+            pred = np.array([[pred_mag, pred_time]], dtype=float)
+
+            loaded_info = ", ".join(
+                f"{n}(m:{mag_weights.get(n,0):.3f}/t:{time_weights.get(n,0):.3f})"
+                for n in model_preds
+            )
+            print(f"   双目标融合: {loaded_info}")
+            predicted_mag = pred_mag
+            predicted_time = pred_time
+            print(f"  预测来源: ensemble_regression")
+        except Exception as exc:
+            if not args.allow_rule_fallback:
+                raise RuntimeError(
+                    "模型推理失败。请确认 baseline_model.joblib、feature_cols.json "
+                    "和 ensemble_weights.json 已生成；或加 --allow-rule-fallback。"
+                ) from exc
+            print(f"警告：模型推理失败，使用规则兜底。原因: {exc}")
+            pred = rule_fallback_prediction(mainshock_mag, early_count)
+            predicted_mag, predicted_time = postprocess_prediction(
+                pred, mainshock_mag=mainshock_mag, early_count=early_count,
+            )
+
+    # Only apply postprocess if NOT gated (gating already sets explicit values)
+    if not gated_no_aftershock:
+        pred = np.array([[predicted_mag, predicted_time]], dtype=float)
+        predicted_mag, predicted_time = postprocess_prediction(
+            pred, mainshock_mag=mainshock_mag, early_count=early_count,
+        )
 
     submission_df = pd.DataFrame(
         [

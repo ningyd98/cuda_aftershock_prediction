@@ -460,6 +460,99 @@ def train_full_models(
     return backends
 
 
+def train_two_stage_classifier(
+    raw_df: pd.DataFrame,
+    feature_cols: list[str],
+    args: argparse.Namespace,
+) -> None:
+    """
+    训练二阶段零膨胀门控分类器。
+
+    分类标签: has_target_aftershock (若不存在则 fallback 到 target_max_mag > 0)
+    使用与回归器相同的 feature_cols。
+    保存 classifier_meta.json 和 classifier_model.joblib。
+    """
+    save_dir = resolve_project_path(args.save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    from sklearn.model_selection import cross_val_score
+
+    df_cls = raw_df.copy()
+    # 确定分类标签
+    if "has_target_aftershock" in df_cls.columns:
+        y_cls = df_cls["has_target_aftershock"].astype(int)
+    elif "target_max_mag" in df_cls.columns:
+        y_cls = df_cls["target_max_mag"].notna().astype(int)
+    else:
+        print("⚠ 无法确定分类标签，跳过分类器训练")
+        return
+
+    pos_rate = float(y_cls.mean())
+    print(f"\n两阶段分类器: positive_rate={pos_rate:.4f}, 正样本数={y_cls.sum()}/{len(y_cls)}")
+
+    X_cls = df_cls[feature_cols].fillna(0.0)
+    for col in X_cls.columns:
+        if pd.api.types.is_bool_dtype(X_cls[col]):
+            X_cls[col] = X_cls[col].astype(int)
+
+    # 尝试 LightGBM 分类器，回退到 sklearn
+    try:
+        from lightgbm import LGBMClassifier
+        clf = LGBMClassifier(
+            n_estimators=min(args.n_estimators, 200),
+            learning_rate=args.learning_rate,
+            random_state=args.seed,
+            verbosity=-1,
+            class_weight="balanced",
+        )
+        clf_backend = "lightgbm"
+    except ImportError:
+        from sklearn.ensemble import HistGradientBoostingClassifier
+        clf = HistGradientBoostingClassifier(
+            max_iter=min(args.n_estimators, 200),
+            learning_rate=args.learning_rate,
+            random_state=args.seed,
+            class_weight="balanced",
+        )
+        clf_backend = "sklearn"
+
+    # 简单 CV 评估
+    try:
+        cv_scores = cross_val_score(clf, X_cls, y_cls, cv=min(args.n_splits, 5), scoring="roc_auc")
+        cv_auc = float(cv_scores.mean())
+        print(f"  CV AUC (roc): {cv_auc:.4f} (+/- {cv_scores.std():.4f})")
+    except Exception:
+        cv_auc = None
+
+    # 全量训练
+    clf.fit(X_cls, y_cls)
+    joblib.dump(clf, save_dir / "aftershock_classifier.joblib")
+
+    meta = {
+        "positive_rate": round(pos_rate, 4),
+        "feature_cols": feature_cols,
+        "threshold": 0.5,
+        "cv_auc": round(cv_auc, 4) if cv_auc is not None else None,
+        "backend": clf_backend,
+    }
+    with (save_dir / "classifier_meta.json").open("w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    print(f"  ✓ 分类器已保存: {save_dir / 'aftershock_classifier.joblib'}")
+
+
+def prepare_regression_subset(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    仅保留 has_target_aftershock=True 且目标列非 NaN 的样本用于回归训练。
+    若 has_target_aftershock 不存在，则 fallback 到 target_max_mag.notna()。
+    """
+    df = raw_df.copy()
+    if "has_target_aftershock" in df.columns:
+        mask = df["has_target_aftershock"].astype(bool)
+    else:
+        mask = df["target_max_mag"].notna()
+    return df.loc[mask].dropna(subset=TARGET_COLS).reset_index(drop=True)
+
+
 def save_training_artifacts(
     save_dir: Path,
     feature_cols: list[str],
@@ -530,7 +623,9 @@ def main() -> None:
     set_random_seed(args.seed)
 
     data_path = resolve_project_path(args.data)
-    df = prepare_training_frame(pd.read_csv(data_path))
+    raw_df = pd.read_csv(data_path)
+    # 回归训练用正样本子集
+    df = prepare_regression_subset(raw_df)
     df = add_derived_features(df)
     feature_cols = select_feature_columns(df)
     model_names = requested_model_names(args.model_type)
@@ -597,6 +692,8 @@ def main() -> None:
 
     if args.save_dir is not None:
         model_backends = train_full_models(df, feature_cols, model_names, args)
+        # 训练两阶段分类器 (使用全量原始数据)
+        train_two_stage_classifier(raw_df, feature_cols, args)
         save_training_artifacts(
             save_dir=args.save_dir,
             feature_cols=feature_cols,

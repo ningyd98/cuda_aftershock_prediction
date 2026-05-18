@@ -66,10 +66,15 @@ def load_oof_file(path: Path) -> pd.DataFrame | None:
 
 
 def merge_all_oof(model_dir: Path) -> tuple[pd.DataFrame, list[str]]:
-    """合并且所有可用的 OOF 预测。返回 (merged_df, available_models)。"""
+    """合并所有可用的 OOF 预测。返回 (merged_df, available_models)。
+
+    优先使用 [mainshock_id, mainshock_time] 作为 join key；
+    若缺失 mainshock_time 则退化为仅用 mainshock_id，并打印 warning。
+    """
     base_cols = [ID_COL, TIME_COL, *TARGET_COLS]
     merged: pd.DataFrame | None = None
     available: list[str] = []
+    has_time_col: bool | None = None
 
     for model_name, csv_name in MODEL_FILE_MAP.items():
         path = model_dir / csv_name
@@ -82,13 +87,20 @@ def merge_all_oof(model_dir: Path) -> tuple[pd.DataFrame, list[str]]:
             print(f"  ⚠ {csv_name}: 缺少预测列 {mag_col}/{time_col}，跳过 {model_name}")
             continue
 
-        keep = [c for c in base_cols if c in df.columns] + [mag_col, time_col]
+        file_has_time = TIME_COL in df.columns
+        if not file_has_time and has_time_col is None:
+            print(f"  ⚠ {csv_name}: 缺少 {TIME_COL} 列，将仅使用 {ID_COL} 做 merge")
+        has_time_col = (has_time_col if has_time_col is not None else file_has_time) and file_has_time
+
+        join_keys = [ID_COL] if not file_has_time else [ID_COL, TIME_COL]
+        available_keys = [c for c in join_keys if c in df.columns]
+        keep = available_keys + [c for c in (*TARGET_COLS, mag_col, time_col) if c in df.columns]
         sub = df[keep].copy()
 
         if merged is None:
             merged = sub
         else:
-            merged = merged.merge(sub, on=ID_COL, how="inner", suffixes=("", f"_dup_{model_name}"))
+            merged = merged.merge(sub, on=available_keys, how="inner", suffixes=("", f"_dup_{model_name}"))
         available.append(model_name)
 
     if merged is None or not available:
@@ -230,6 +242,14 @@ def main() -> None:
     output_dir = resolve_project_path(args.output_dir) if args.output_dir else model_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # 验证 grid_step 能否整除 1.0
+    if 1.0 % args.grid_step > 1e-9 and abs(1.0 % args.grid_step - args.grid_step) > 1e-9:
+        # 不能整除，自动修整为最接近的整除数
+        n_pts = max(1, int(1.0 / args.grid_step))
+        corrected = 1.0 / n_pts
+        print(f"⚠ grid_step={args.grid_step} 不能整除 1.0，已自动修正为 {corrected:.4f}")
+        args.grid_step = corrected
+
     print("=== 多模型 OOF 融合权重搜索 ===")
     print(f"模型目录: {model_dir}")
     print(f"步长: {args.grid_step}\n")
@@ -310,7 +330,8 @@ def main() -> None:
     print(f"  {output_dir / 'ensemble_metrics.json'}")
     print(f"  {output_dir / 'ensemble_oof_predictions.csv'}")
 
-    # 6. 单模型 vs 融合对比
+    # 6. 单模型 vs 融合对比 (同时收集单模型指标写入 metrics_json)
+    per_model_metrics: dict[str, dict] = {}
     print(f"\n{'='*60}")
     print("单模型 vs 融合 (OOF 指标)")
     print(f"{'='*60}")
@@ -323,11 +344,17 @@ def main() -> None:
             y_pred_time=merged[time_col].to_numpy(),
             late_weight=args.late_weight,
         )
+        per_model_metrics[m] = {k: round(float(v), 4) for k, v in m_metrics.items()}
         print(f"\n  [{m}]")
         print(f"    mag_rmse={m_metrics['mag_rmse']:.4f}  time_rmse={m_metrics['time_rmse']:.4f}  time_asymmetric_rmse={m_metrics['time_asymmetric_rmse']:.4f}")
 
     print(f"\n  [ENSEMBLE]")
     print(f"    mag_rmse={ensemble_metrics['mag_rmse']:.4f}  time_rmse={ensemble_metrics['time_rmse']:.4f}  time_asymmetric_rmse={ensemble_metrics['time_asymmetric_rmse']:.4f}")
+
+    # 更新 metrics_json 包含单模型指标
+    metrics_json["per_model_metrics"] = per_model_metrics
+    with (output_dir / "ensemble_metrics.json").open("w", encoding="utf-8") as f:
+        json.dump(metrics_json, f, ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":

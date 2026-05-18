@@ -183,6 +183,75 @@ python scripts/train_ensemble.py --model-dir data/models
 重点关注 OOF 指标，而非训练集指标。OOF 指标直接反映
 模型对"未见过的未来地震"的预测能力。
 
+### OOF → Full-Fit 闭环
+
+OOF 流程不仅搜索融合权重，还会自动训练最终模型：
+
+```bash
+./run.sh --skip-download --train-oof-ensemble
+```
+
+完整产物清单:
+- `data/models/oof_predictions.csv` — 树模型 OOF 预测
+- `data/models/dl_oof_predictions.csv` — Transformer OOF 预测
+- `data/models/gnn_oof_predictions.csv` — ST-GNN OOF 预测
+- `data/models/ensemble_weights.json` — 双目标融�的合权重
+- `data/models/ensemble_metrics.json` — 融合 + 各单模型 OOF 指标
+- `data/models/ensemble_oof_predictions.csv` — 融合后 OOF 预测
+- `data/models/baseline_model.joblib` — 全量数据 LGBM 模型
+- `data/models/dl_model.pt` — 全量数据 Transformer 模型 (OOF 后自动训练)
+- `data/models/gnn_model.pt` — 全量数据 ST-GNN 模型 (OOF�的�自动训练)
+
+> OOF 模型用于调权，Full-Fit 模型用于最终推理。
+
+### 结果可视化
+
+```bash
+python scripts/visualize_results.py \
+    --oof data/models/ensemble_oof_predictions.csv \
+    --features data/processed/advanced_features.csv \
+    --weights data/models/ensemble_weights.json \
+    --output-dir reports/figures
+```
+
+生成 5 张图:
+- `mag_scatter.png` — 实际 vs 预测震级散点
+- `time_scatter_log.png` — log1p 时间散点
+- `residual_dist.png` — 残差分布
+- `error_by_plate.png` — 按板块类型的误差
+- `ensemble_weights.png` — 融合权重柱状图
+
+## 两阶段零膨胀门控预测
+
+### 原理
+
+大量主震没有后续强余震，直接回归会扭曲分布。两阶段方案:
+1. **分类器** (`aftershock_classifier.joblib`): 预测"是否有余震"
+2. **回归器** (现有 ensemble): 仅对"有余震"的样本预测 magnitude/time
+
+### 训练
+
+分类器随 `train_baseline.py` 自动训练：
+```bash
+python scripts/train_baseline.py --model-type both --save-dir data/models
+# 输出: aftershock_classifier.joblib + classifier_meta.json
+```
+
+### 推理
+
+```bash
+# 启用门控
+python scripts/make_submission.py \
+    --input data/test_sequences/20230206011734_eq.csv \
+    --output submission.csv \
+    --model-dir data/models \
+    --use-gating --gating-threshold 0.5 \
+    --no-aftershock-mag 0.0 --no-aftershock-time 0.0
+```
+
+当 `prob_has_aftershock < threshold` 时直接输出
+`no_aftershock_mag` / `no_aftershock_time`，不再调回归器。
+
 ## Transformer 深度学习方案
 
 ### 架构

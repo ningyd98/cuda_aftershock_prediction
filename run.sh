@@ -37,6 +37,9 @@ OOF_PURGE_DAYS=30.0
 OOF_GRID_STEP=0.02
 OOF_DL_EPOCHS=30
 OOF_GNN_EPOCHS=30
+FULL_FIT_DL_EPOCHS=50
+FULL_FIT_GNN_EPOCHS=50
+
 if [ -x "${CONDA_PREFIX}/bin/python" ]; then
     PYTHON="${CONDA_PREFIX}/bin/python"
 else
@@ -67,6 +70,7 @@ show_usage() {
   --with-gcmt         下载/使用 Global CMT 震源机制解
   --mock-eval         运行模拟线上评测
   --train-oof-ensemble 全模型 OOF 融合 (树+DL+GNN)，输出双目标权重
+  --reset-ensemble-weights 强制重写 ensemble_weights.json
   --analyze-transformer Transformer 模型分析与可解释性
   --no-install        跳过 pip install
   --install           强制重新安装依赖
@@ -83,6 +87,7 @@ MOCK_EVAL=false
 NO_INSTALL=false
 FORCE_INSTALL=false
 TRAIN_OOF_ENSEMBLE=false
+RESET_ENSEMBLE_WEIGHTS=false
 
 for arg in "$@"; do
     case "$arg" in
@@ -99,6 +104,7 @@ for arg in "$@"; do
         --no-install) NO_INSTALL=true ;;
         --install) FORCE_INSTALL=true ;;
         --train-oof-ensemble) TRAIN_OOF_ENSEMBLE=true ;;
+        --reset-ensemble-weights) RESET_ENSEMBLE_WEIGHTS=true ;;
         --analyze-transformer) ;; # 已弃用，保留兼容
         train-only) TRAIN_ONLY=true ;;
         -h|--help) show_usage; exit 0 ;;
@@ -163,6 +169,27 @@ run_oof_pipeline() {
     info "融合权重已保存 → ${MODEL_DIR}/ensemble_weights.json"
     info "融合指标已保存 → ${MODEL_DIR}/ensemble_metrics.json"
     info "融合 OOF 预测 → ${MODEL_DIR}/ensemble_oof_predictions.csv"
+
+    # ---- OOF-5 & OOF-6: Full-Fit 最终模型 ----
+    step "OOF-5. 全量训练最终 Transformer"
+    "${PYTHON}" scripts/train_dl.py \
+        --features "$ADVANCED_FEATURES" \
+        --event-catalog "$dl_catalog" \
+        --epochs "$FULL_FIT_DL_EPOCHS" \
+        --batch-size 32 \
+        --save-dir "$MODEL_DIR" \
+        --device auto
+    info "最终 Transformer 已保存 → ${MODEL_DIR}/dl_model.pt"
+
+    step "OOF-6. 全量训练最终 ST-GNN"
+    "${PYTHON}" scripts/train_gnn.py \
+        --features "$ADVANCED_FEATURES" \
+        --event-catalog "$dl_catalog" \
+        --epochs "$FULL_FIT_GNN_EPOCHS" \
+        --batch-size 16 \
+        --save-dir "$MODEL_DIR" \
+        --device auto
+    info "最终 ST-GNN 已保存 → ${MODEL_DIR}/gnn_model.pt"
 }
 
 step "0. 环境检查"
@@ -254,7 +281,8 @@ if [ "$TRAIN_OOF_ENSEMBLE" = true ]; then
     info "产物清单:"
     info "  树 OOF:        ${MODEL_DIR}/oof_predictions.csv"
     info "  DL OOF:        ${MODEL_DIR}/dl_oof_predictions.csv"
-    info "  GNN OOF:       ${MODEL_DIR}/gnn_oof_predictions.csv"
+    info "  OOF 后 Full-Fit 模型: ${MODEL_DIR}/dl_model.pt"
+    info "  OOF 后 Full-Fit 模型: ${MODEL_DIR}/gnn_model.pt"
     info "  融合权重:      ${MODEL_DIR}/ensemble_weights.json"
     info "  融合指标:      ${MODEL_DIR}/ensemble_metrics.json"
     info "  融合 OOF 预测: ${MODEL_DIR}/ensemble_oof_predictions.csv"
@@ -326,9 +354,16 @@ if [ "$WITH_GNN" = true ]; then
     info "ST-GNN 训练完成 ✓"
 fi
 
-# ---- 常规模式：更新融合权重 ----
+# ---- 常规模式：更新融合权重 (仅当没有 OOF 双目标权重时) ----
 step "5d. 更新可用模型融合权重"
-WITH_DL_ENV="$WITH_DL" WITH_GNN_ENV="$WITH_GNN" "${PYTHON}" - <<'PY'
+WEIGHTS_PATH="${MODEL_DIR}/ensemble_weights.json"
+if [ "$RESET_ENSEMBLE_WEIGHTS" = false ] && [ -f "$WEIGHTS_PATH" ]; then
+    HAS_DUAL_TARGET=$(grep -c '"mag"' "$WEIGHTS_PATH" 2>/dev/null || echo 0)
+    if [ "$HAS_DUAL_TARGET" -gt 0 ]; then
+        info "ensemble_weights.json 已是双目标格式，跳过覆盖 (用 --reset-ensemble-weights 强制)"
+    else
+        warn "旧格式权重将被覆盖"
+        WITH_DL_ENV="$WITH_DL" WITH_GNN_ENV="$WITH_GNN" "${PYTHON}" - <<'PY'
 import json
 import os
 from pathlib import Path
@@ -361,6 +396,8 @@ if deep_models:
 weights_path.write_text(json.dumps(weights, ensure_ascii=False, indent=2), encoding="utf-8")
 print(json.dumps(weights, ensure_ascii=False, indent=2))
 PY
+    fi
+fi
 
 step "6. 对测试序列生成余震预测"
 shopt -s nullglob
