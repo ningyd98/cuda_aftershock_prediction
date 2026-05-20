@@ -1187,7 +1187,7 @@ def run_tuning(
 #  CLI & 保存
 # ============================================================
 
-def save_results(study, best_params, best_holdout, output_dir, late_weight, include_dl, include_gnn):
+def save_results(study, best_params, best_holdout, output_dir, late_weight, include_dl, include_gnn, mag_weight=3.0):
     optuna = _ensure_optuna()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1237,7 +1237,7 @@ def save_results(study, best_params, best_holdout, output_dir, late_weight, incl
 
     # ─── 生成可读调优报告 ───
     _write_tuning_report(output_dir, study, model_params, meta, best_holdout,
-                         late_weight, include_dl, include_gnn)
+                         late_weight, include_dl, include_gnn, mag_weight)
 
     # Final console report
     print(f"\n{'='*60}")
@@ -1286,6 +1286,7 @@ def _write_tuning_report(
     late_weight: float,
     include_dl: bool,
     include_gnn: bool,
+    mag_weight: float = 3.0,
 ) -> None:
     """生成调优报告 Markdown 文件。"""
     available_models = meta.get("_available_models", [])
@@ -1552,7 +1553,7 @@ def main():
         optuna_n_jobs=args.optuna_n_jobs,
     )
 
-    save_results(study, best_params, best_holdout, output_dir, args.late_weight, include_dl, include_gnn)
+    save_results(study, best_params, best_holdout, output_dir, args.late_weight, include_dl, include_gnn, args.mag_weight)
 
     elapsed = time.time() - t0
     print(f"\n总耗时: {elapsed/60:.1f} 分钟 ({elapsed/3600:.1f} 小时)")

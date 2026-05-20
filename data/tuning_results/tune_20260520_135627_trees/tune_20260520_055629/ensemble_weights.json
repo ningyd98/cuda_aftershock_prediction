@@ -1,0 +1,10 @@
+{
+  "mag": {
+    "baseline": 0.48,
+    "xgboost": 0.52
+  },
+  "time": {
+    "baseline": 0.32,
+    "xgboost": 0.68
+  }
+}

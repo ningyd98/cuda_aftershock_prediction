@@ -69,6 +69,7 @@ class SpatialGraphConv(nn.Module):
 
         # ─── 各向异性应力传导：沿断层走向强化，垂直走向抑制 ───
         if strike_rad is not None:
+            strike_rad = strike_rad.to(x.device)
             # 计算边方向 azimuth: atan2(dx, dy) where dx=east, dy=north
             dx = coord_diff[..., 0]  # (B, N, N)
             dy = coord_diff[..., 1]

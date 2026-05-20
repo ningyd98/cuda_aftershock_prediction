@@ -6,8 +6,8 @@
     "gnn": 0.0
   },
   "time": {
-    "baseline": 0.32,
-    "xgboost": 0.68,
+    "baseline": 0.0,
+    "xgboost": 1.0,
     "dl": 0.0,
     "gnn": 0.0
   }
