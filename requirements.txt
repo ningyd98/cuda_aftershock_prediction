@@ -9,7 +9,7 @@ scikit-learn
 geopandas
 shapely
 pyproj
-lightgbm
+lightgbm>=4.5  # 需通过 conda 安装 CUDA 版本: conda install lightgbm=4.6.0=cuda* -c pkgs/main
 xgboost
 torch
 matplotlib

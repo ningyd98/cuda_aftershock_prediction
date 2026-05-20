@@ -171,6 +171,160 @@ def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ============================================================
+#  领域知识缺失值填补
+# ============================================================
+# 许多地震学特征（Omori-Utsu, ETAS, G-R b 值）需要足够数量的
+# 早期余震才能拟合。当早期余震数量不足时，这些特征为 NaN。
+# 使用物理合理的默认值填补 + missing indicator 可显著提升模型
+# 对低活动度序列的预测能力。
+
+# 领域先验默认值（基于全球地震学统计）
+_DOMAIN_DEFAULTS = {
+    "gr_b_value": 1.0,          # G-R 全球平均 b ≈ 1.0
+    "gr_a_value": 5.0,          # 中等地震活动度
+    "gr_mc": 4.0,               # 典型完备震级
+    "gr_n": 5,                  # 最小拟合事件数
+    "gr_valid": 0,              # 标记为无效
+    "omori_p": 1.0,             # 大森衰减指数 p ≈ 1.0
+    "omori_c": 0.05,            # 时间偏移 c ≈ 0.05 天
+    "omori_k": 1.0,             # 归一化振幅
+    "omori_nll": 10.0,          # 中等负对数似然
+    "omori_n": 8,               # 最小拟合事件数
+    "omori_p_boundary_hit": 0,
+    "omori_valid": 0,
+    "etas_mu": 0.01,            # 背景地震率
+    "etas_K0": 0.001,           # 触发系数
+    "etas_alpha": 1.0,          # 触发效率指数
+    "etas_c": 0.05,             # 时间偏移
+    "etas_p": 1.0,              # 衰减指数
+    "etas_nll": 10.0,
+    "etas_n": 8,
+    "etas_valid": 0,
+    # 新增 ETAS 事件级诊断特征默认值
+    "etas_branching_ratio": 0.3,
+    "etas_expected_count": 8.0,
+    "etas_triggered_fraction": 0.3,
+    "etas_triggered_mag_sum": 12.0,
+    "etas_bg_rate_total": 3.0,
+    "anisotropy_major_axis_km": 50.0,   # 中等空间扩散
+    "anisotropy_minor_axis_km": 25.0,
+    "anisotropy_axis_ratio": 2.0,
+    "anisotropy_azimuth_deg": 90.0,
+    "anisotropy_n": 3,
+    "anisotropy_valid": 0,
+    "bath_deficit": 1.2,        # Båth 典型差值 ΔM ≈ 1.2
+    "bath_early_max_mag": 0.0,
+    "bath_valid": 0,
+    "productivity_index": 0.0,
+    "focal_mechanism_valid": 0,
+    "strike1": 0.0, "dip1": 45.0, "rake1": 0.0,
+    "strike2": 0.0, "dip2": 45.0, "rake2": 0.0,
+    "plunge_P": 0.0, "trend_P": 0.0,
+    "plunge_T": 0.0, "trend_T": 0.0,
+    "f_clvd": 0.0,
+    "gcmt_time_diff_seconds": 86400.0,
+    "gcmt_distance_km": 100.0,
+    # 早期活动特征：无活动 → 全 0
+    "early_aftershock_count": 0, "early_max_mag": 0.0,
+    "early_mean_mag": 0.0, "early_energy_sum": 0.0,
+    "count_1h": 0, "energy_1h": 0.0, "count_6h": 0, "energy_6h": 0.0,
+    "count_12h": 0, "energy_12h": 0.0, "count_24h": 0, "energy_24h": 0.0,
+    "count_72h": 0, "energy_72h": 0.0,
+    "advanced_early_event_count": 0,
+}
+
+# 按板块类型的领域先验默认值
+# 参考: SUB(俯冲带) 活动度高、Omori p 偏大、b 值偏低；
+#       UNK(板内) 活动度低、空间扩散小
+_DOMAIN_DEFAULTS_BY_PLATE: dict[str, dict[str, float]] = {
+    "SUB": {
+        "gr_b_value": 0.8, "omori_p": 1.2, "omori_k": 2.0,
+        "etas_mu": 0.02, "etas_K0": 0.005,
+        "etas_expected_count": 12.0, "etas_bg_rate_total": 5.0,
+        "anisotropy_major_axis_km": 70.0, "anisotropy_minor_axis_km": 40.0,
+        "anisotropy_axis_ratio": 2.5, "productivity_index": 1.0,
+    },
+    "OSR": {
+        "gr_b_value": 1.1, "omori_p": 1.0,
+        "etas_expected_count": 8.0,
+        "anisotropy_major_axis_km": 40.0, "anisotropy_minor_axis_km": 20.0,
+        "anisotropy_axis_ratio": 2.0,
+    },
+    "OTF": {
+        "gr_b_value": 1.0, "omori_p": 1.0,
+        "etas_expected_count": 8.0,
+        "anisotropy_major_axis_km": 45.0, "anisotropy_minor_axis_km": 25.0,
+        "anisotropy_axis_ratio": 2.2,
+    },
+    "UNK": {
+        "gr_b_value": 1.0, "omori_p": 0.9, "omori_k": 0.5,
+        "etas_mu": 0.005, "etas_K0": 0.0005,
+        "etas_expected_count": 5.0, "etas_bg_rate_total": 1.5,
+        "anisotropy_major_axis_km": 30.0, "anisotropy_minor_axis_km": 15.0,
+        "anisotropy_axis_ratio": 1.8, "productivity_index": -0.5,
+    },
+}
+
+
+def impute_missing_features(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    add_missing_indicators: bool = True,
+    plate_type_col: str | None = "nearest_plate_boundary_type",
+) -> pd.DataFrame:
+    """使用领域知识填补缺失特征，支持按板块类型分层填补。
+
+    Args:
+        df: 特征 DataFrame
+        feature_cols: 特征列名列表
+        add_missing_indicators: 是否为被填补的列创建 _missing 指示列
+        plate_type_col: 板块类型列名；不存在时回退到全局默认值
+
+    Returns:
+        填补后的 DataFrame（原地修改 + 添加新列）
+    """
+    df = df.copy()
+    new_indicator_cols: list[str] = []
+    has_plate = plate_type_col is not None and plate_type_col in df.columns
+
+    for col in feature_cols:
+        if col not in df.columns:
+            continue
+        null_mask = df[col].isnull()
+        if not null_mask.any():
+            continue
+
+        # Missing indicator
+        if add_missing_indicators:
+            indicator_col = f"{col}_missing"
+            df[indicator_col] = null_mask.astype(int)
+            new_indicator_cols.append(indicator_col)
+
+        # 按板块类型分层填补 → 全局默认值回退
+        if col in _DOMAIN_DEFAULTS:
+            if has_plate:
+                for plate_type, plate_defaults in _DOMAIN_DEFAULTS_BY_PLATE.items():
+                    if col not in plate_defaults:
+                        continue
+                    plate_mask = null_mask & (df[plate_type_col] == plate_type)
+                    if plate_mask.any():
+                        df.loc[plate_mask, col] = df.loc[plate_mask, col].fillna(
+                            plate_defaults[col]
+                        )
+            df[col] = df[col].fillna(_DOMAIN_DEFAULTS[col])
+        else:
+            df[col] = df[col].fillna(df[col].median() if df[col].notna().any() else 0.0)
+
+    if new_indicator_cols:
+        plate_info = f" (按板块分层, {len(_DOMAIN_DEFAULTS_BY_PLATE)} 类)" if has_plate else ""
+        print(
+            f"领域知识填补: 对 {len(new_indicator_cols)} 个特征列添加了 missing indicator，"
+            f"使用 {len(_DOMAIN_DEFAULTS)} 个领域先验默认值{plate_info}"
+        )
+    return df
+
+
 def prepare_training_frame(df: pd.DataFrame) -> pd.DataFrame:
     """清理训练数据：目标和时间必须存在，特征缺失保留给树模型处理。"""
     cleaned_df = df.copy()
@@ -197,14 +351,28 @@ def requested_model_names(model_type: str) -> list[str]:
     return ["baseline", "xgboost"]
 
 
-def build_model(model_name: str, args: argparse.Namespace):
-    """按模型名称创建一个全新的模型实例。"""
+def build_model(model_name: str, args: argparse.Namespace, extra_params: dict | None = None):
+    """按模型名称创建一个全新的模型实例。
+
+    Args:
+        model_name: 'baseline' 或 'xgboost'
+        args: 命令行参数
+        extra_params: 可选的额外模型超参数（如来自调优的结果）
+    """
     common_kwargs = {
         "random_state": args.seed,
         "n_estimators": args.n_estimators,
         "learning_rate": args.learning_rate,
         "transform_time_target": True,
     }
+    # 合并调优参数
+    if extra_params:
+        for key in ("num_leaves", "subsample", "colsample_bytree",
+                     "reg_alpha", "reg_lambda", "min_child_samples",
+                     "max_depth", "learning_rate", "n_estimators"):
+            if key in extra_params:
+                common_kwargs[key] = extra_params[key]
+
     if model_name == "baseline":
         lgbm_device = get_lightgbm_device(getattr(args, "device", "auto"))
         return BaselineLGBM(
@@ -266,7 +434,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--device",
         type=str,
-        default="auto",
+        default="cuda",
         choices=["auto", "cuda", "cpu"],
         help="LightGBM 设备: auto, cuda, cpu",
     )
@@ -275,7 +443,152 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="LightGBM GPU 使用双精度（更精确但略慢）",
     )
+    parser.add_argument(
+        "--impute-missing",
+        action="store_true",
+        default=True,
+        help="使用领域知识填补缺失特征 (默认启用)",
+    )
+    parser.add_argument(
+        "--no-impute",
+        action="store_true",
+        help="禁用领域知识缺失值填补",
+    )
+    parser.add_argument(
+        "--feature-selection",
+        action="store_true",
+        help="基于 LightGBM 特征重要性自动筛选特征 (需 --impute-missing)",
+    )
+    parser.add_argument(
+        "--feature-selection-min",
+        type=int,
+        default=30,
+        help="特征选择最少保留特征数 (默认 30)",
+    )
+    parser.add_argument(
+        "--feature-selection-ratio",
+        type=float,
+        default=0.85,
+        help="累计 gain 阈值 (默认 0.85)",
+    )
+    parser.add_argument(
+        "--tune-hyperparams",
+        action="store_true",
+        help="每折 LightGBM 随机超参数搜索 (较慢但可能提升 3~8%)",
+    )
+    parser.add_argument(
+        "--tune-n-trials",
+        type=int,
+        default=20,
+        help="每折超参数搜索的随机采样次数 (默认 20)",
+    )
+    parser.add_argument(
+        "--min-purge-days",
+        type=float,
+        default=7.0,
+        help="最小 purge 间隔天数，样本少时强制使用的保护性 gap (默认 7)",
+    )
+    parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=1,
+        help="并行任务数 (超参数调优时使用，默认 1)",
+    )
     return parser.parse_args()
+
+
+def _tune_lgbm_params(
+    X_train: pd.DataFrame,
+    y_train: pd.DataFrame,
+    args: argparse.Namespace,
+    n_trials: int = 20,
+) -> dict:
+    """对 LightGBM 进行随机超参数搜索（每折独立）。"""
+    from sklearn.model_selection import RandomizedSearchCV
+    from lightgbm import LGBMRegressor
+
+    param_dist = {
+        "num_leaves": [31, 63, 127, 255],
+        "learning_rate": [0.01, 0.02, 0.03, 0.05],
+        "subsample": [0.6, 0.7, 0.8, 0.9],
+        "colsample_bytree": [0.6, 0.7, 0.8],
+        "reg_alpha": [0.0, 0.01, 0.05, 0.1],
+        "reg_lambda": [0.5, 1.0, 2.0, 5.0],
+        "min_child_samples": [10, 20, 30, 50],
+    }
+
+    lgbm_device = get_lightgbm_device(getattr(args, "device", "auto"))
+    base = LGBMRegressor(
+        n_estimators=args.n_estimators,
+        random_state=args.seed,
+        n_jobs=1,
+        verbosity=-1,
+        device=lgbm_device if lgbm_device == "cuda" else "cpu",
+    )
+
+    # 对时间目标用普通回归（非对称目标在外部处理）
+    y_mag = y_train.iloc[:, 0]
+    search = RandomizedSearchCV(
+        base,
+        param_dist,
+        n_iter=min(n_trials, len(param_dist["num_leaves"]) * len(param_dist["learning_rate"])),
+        cv=min(3, max(2, len(X_train) // 50)),
+        scoring="neg_root_mean_squared_error",
+        random_state=args.seed,
+        n_jobs=max(1, args.n_jobs if hasattr(args, "n_jobs") else 1),
+    )
+    search.fit(X_train, y_mag)
+    return search.best_params_
+
+
+def _select_features_by_importance(
+    X_train: pd.DataFrame,
+    y_train: pd.DataFrame,
+    feature_cols: list[str],
+    args: argparse.Namespace,
+    min_features: int = 30,
+    top_k_ratio: float = 0.85,
+) -> list[str]:
+    """使用 LightGBM 特征重要性筛选最有用的特征。
+
+    训练一个快速 LightGBM，按 gain importance 排序，保留累计贡献达
+    top_k_ratio 的特征（同时保证最少 min_features 个）。
+    """
+    try:
+        from lightgbm import LGBMRegressor
+    except ImportError:
+        return feature_cols
+
+    if len(feature_cols) <= min_features:
+        return feature_cols
+
+    lgbm_device = get_lightgbm_device(getattr(args, "device", "auto"))
+    model = LGBMRegressor(
+        n_estimators=min(100, args.n_estimators),
+        num_leaves=31,
+        learning_rate=0.05,
+        random_state=args.seed,
+        n_jobs=1,
+        verbosity=-1,
+        device=lgbm_device if lgbm_device == "cuda" else "cpu",
+    )
+    model.fit(X_train, y_train.iloc[:, 0])
+
+    # 按 gain 排序
+    importance = model.booster_.feature_importance(importance_type="gain")
+    sorted_idx = np.argsort(importance)[::-1]
+    total_gain = importance.sum()
+    if total_gain <= 0:
+        return feature_cols
+
+    cumsum = np.cumsum(importance[sorted_idx]) / total_gain
+    n_keep = max(min_features, int(np.searchsorted(cumsum, top_k_ratio) + 1))
+    n_keep = min(n_keep, len(feature_cols))
+    selected = [feature_cols[i] for i in sorted_idx[:n_keep]]
+
+    print(f"  特征选择: {len(feature_cols)} → {len(selected)} "
+          f"(累计 gain {cumsum[min(n_keep-1, len(cumsum)-1)]:.1%})")
+    return selected
 
 
 def run_oof_cv(
@@ -284,13 +597,42 @@ def run_oof_cv(
     model_names: list[str],
     args: argparse.Namespace,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, dict]]:
-    """按时间滚动验证，并为每个树模型生成 OOF 预测。"""
+    """按时间滚动验证，并为每个树模型生成 OOF 预测。
+
+    增强功能:
+    - 每折可选超参数调优 (--tune-hyperparams)
+    - 基于第一折特征重要性的自动特征选择 (--feature-selection)
+    - 领域知识缺失值填补 (--impute-missing)
+    - 增强 purge 机制
+    """
     train_df = df.sort_values(TIME_COL).reset_index(drop=True)
     splitter = TimeSeriesSplit(n_splits=args.n_splits)
+
+    # ---- 缺失值填补 ----
+    if getattr(args, "impute_missing", True):
+        train_df = impute_missing_features(train_df, feature_cols, add_missing_indicators=True)
+        # 将新添加的 _missing 列加入特征集
+        new_missing_cols = [c for c in train_df.columns if c.endswith("_missing")]
+        feature_cols = feature_cols + new_missing_cols
+        print(f"填补后特征数: {len(feature_cols)} (含 {len(new_missing_cols)} 个 missing indicator)")
+
+    # ---- 特征选择 (基于全部训练数据快速训练) ----
+    if getattr(args, "feature_selection", False) and len(feature_cols) > 50:
+        feature_cols = _select_features_by_importance(
+            train_df[feature_cols],
+            train_df[TARGET_COLS],
+            feature_cols,
+            args,
+            min_features=getattr(args, "feature_selection_min", 30),
+            top_k_ratio=getattr(args, "feature_selection_ratio", 0.85),
+        )
+
     X = train_df[feature_cols]
     y = train_df[TARGET_COLS]
 
     purge_delta = pd.Timedelta(days=float(getattr(args, "purge_days", 30.0)))
+    # 最小 purge gap: 即使样本少也至少 purge 7 天
+    min_purge = pd.Timedelta(days=float(getattr(args, "min_purge_days", 7.0)))
 
     oof_preds = {
         model_name: np.full((len(train_df), len(TARGET_COLS)), np.nan, dtype=float)
@@ -319,12 +661,34 @@ def run_oof_cv(
         purge_cutoff = valid_start_time - purge_delta
         purge_mask = train_df.loc[train_idx, TIME_COL] <= purge_cutoff
         train_idx_purged = train_idx[purge_mask.values]
-        if len(train_idx_purged) < max(10, len(train_idx) * 0.3):
-            print(
-                f"  警告: fold {fold_idx} purge 后训练样本仅 {len(train_idx_purged)}，"
-                f"跳过 purge"
-            )
-            train_idx_purged = train_idx
+
+        # 增强 purge: 即使 purge 后样本少，也强制执行最小 gap (7天)
+        if len(train_idx_purged) < max(10, len(train_idx) * 0.2):
+            min_purge_cutoff = valid_start_time - min_purge
+            min_purge_mask = train_df.loc[train_idx, TIME_COL] <= min_purge_cutoff
+            train_idx_purged = train_idx[min_purge_mask.values]
+            if len(train_idx_purged) < max(5, len(train_idx) * 0.1):
+                print(
+                    f"  警告: fold {fold_idx} 即使最小 purge 后训练样本也仅有 "
+                    f"{len(train_idx_purged)}，跳过 purge"
+                )
+                train_idx_purged = train_idx
+
+        # ---- 每折超参数调优 (可选) ----
+        fold_model_kwargs: dict = {}
+        tune_hyperparams = getattr(args, "tune_hyperparams", False)
+        if tune_hyperparams and "baseline" in model_names:
+            try:
+                best_params = _tune_lgbm_params(
+                    X.iloc[train_idx_purged],
+                    y.iloc[train_idx_purged],
+                    args,
+                    n_trials=getattr(args, "tune_n_trials", 20),
+                )
+                fold_model_kwargs = best_params
+                print(f"  Fold {fold_idx} 最优 LGBM 参数: {best_params}")
+            except Exception as e:
+                print(f"  Fold {fold_idx} 超参数调优失败: {e}，使用默认参数")
 
         model_iter = tqdm(
             model_names,
@@ -334,7 +698,7 @@ def run_oof_cv(
         )
         for model_name in model_iter:
             model_iter.set_postfix(model=model_name)
-            model = build_model(model_name, args)
+            model = build_model(model_name, args, extra_params=fold_model_kwargs)
             model.fit(X.iloc[train_idx_purged], y.iloc[train_idx_purged])
             preds = np.asarray(model.predict(X.iloc[valid_idx]), dtype=float)
             preds = np.clip(preds, a_min=0.0, a_max=None)
@@ -812,6 +1176,10 @@ def main() -> None:
     args = parse_args()
     set_random_seed(args.seed)
 
+    # 处理 --no-impute
+    if getattr(args, "no_impute", False):
+        args.impute_missing = False
+
     data_path = resolve_project_path(args.data)
     raw_df = pd.read_csv(data_path)
     # 回归训练用正样本子集
@@ -833,6 +1201,9 @@ def main() -> None:
     print(f"样本数: {len(df)}")
     print(f"特征数: {len(feature_cols)}")
     print(f"模型: {', '.join(model_names)}")
+    print(f"领域填补: {'启用' if getattr(args, 'impute_missing', True) else '禁用'}")
+    print(f"特征选择: {'启用' if getattr(args, 'feature_selection', False) else '禁用'}")
+    print(f"超参数调优: {'启用' if getattr(args, 'tune_hyperparams', False) else '禁用'}")
     print("特征列:")
     print(", ".join(feature_cols))
 

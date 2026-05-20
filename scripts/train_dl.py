@@ -97,10 +97,13 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     late_weight: float = 2.0,
+    use_amp: bool = True,
 ) -> float:
     model.train()
     total_loss = 0.0
     n_batches = 0
+    use_amp = use_amp and device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda") if use_amp else None
 
     for batch in dataloader:
         seq_x = batch["seq_x"].to(device)
@@ -109,11 +112,21 @@ def train_one_epoch(
         seq_padding_mask = batch["seq_padding_mask"].to(device)
 
         optimizer.zero_grad()
-        preds = model(seq_x, global_x, seq_padding_mask)
-        loss = asymmetric_time_mse_loss(preds, y, late_weight=late_weight)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
+
+        with torch.amp.autocast("cuda", enabled=use_amp, dtype=torch.bfloat16):
+            preds = model(seq_x, global_x, seq_padding_mask)
+            loss = asymmetric_time_mse_loss(preds, y, late_weight=late_weight)
+
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
 
         total_loss += loss.item()
         n_batches += 1
@@ -127,20 +140,23 @@ def evaluate_model(
     dataloader: DataLoader,
     device: torch.device,
     late_weight: float = 2.0,
+    use_amp: bool = True,
 ) -> dict:
     model.eval()
     all_preds: list[np.ndarray] = []
     all_targets: list[np.ndarray] = []
+    use_amp = use_amp and device.type == "cuda"
 
-    for batch in dataloader:
-        seq_x = batch["seq_x"].to(device)
-        global_x = batch["global_x"].to(device)
-        y = batch["y"].to(device)
-        seq_padding_mask = batch["seq_padding_mask"].to(device)
+    with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp):
+        for batch in dataloader:
+            seq_x = batch["seq_x"].to(device)
+            global_x = batch["global_x"].to(device)
+            y = batch["y"].to(device)
+            seq_padding_mask = batch["seq_padding_mask"].to(device)
 
-        preds = model(seq_x, global_x, seq_padding_mask)
-        all_preds.append(preds.cpu().numpy())
-        all_targets.append(y.cpu().numpy())
+            preds = model(seq_x, global_x, seq_padding_mask)
+            all_preds.append(preds.cpu().numpy())
+            all_targets.append(y.cpu().numpy())
 
     preds_arr = np.concatenate(all_preds, axis=0)
     targets_arr = np.concatenate(all_targets, axis=0)
@@ -305,6 +321,7 @@ def _run_oof_for_dl(
             unit="epoch",
             leave=False,
         )
+        use_amp = getattr(args, "use_amp", True)
         for _ in epoch_iter:
             train_loss = train_one_epoch(
                 model,
@@ -312,11 +329,12 @@ def _run_oof_for_dl(
                 optimizer,
                 device,
                 late_weight=args.late_weight,
+                use_amp=use_amp,
             )
             # Validate on train scale (log1p), track best model
             model.eval()
             val_loss_total, val_count = 0.0, 0
-            with torch.no_grad():
+            with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp and device.type == "cuda"):
                 for batch in valid_loader:
                     sx = batch["seq_x"].to(device)
                     gx = batch["global_x"].to(device)
@@ -347,7 +365,7 @@ def _run_oof_for_dl(
 
         # Generate OOF predictions on real-day scale
         all_preds, all_targets = [], []
-        with torch.no_grad():
+        with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp and device.type == "cuda"):
             for batch in tqdm(
                 valid_loader,
                 desc=f"DL Fold {fold_idx} OOF预测",
@@ -411,14 +429,14 @@ def parse_args() -> argparse.Namespace:
         default=PROJECT_ROOT / "data" / "raw" / "USGS_Mw4.5_Depth70_1970-2023.csv",
     )
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--d-model", type=int, default=128)
     parser.add_argument("--nhead", type=int, default=4)
     parser.add_argument("--num-layers", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save-dir", type=Path, default=PROJECT_ROOT / "data" / "models")
-    parser.add_argument("--device", type=str, default="auto",
+    parser.add_argument("--device", type=str, default="cuda",
                         help="设备: auto, cuda, mps, cpu")
     # OOF 模式参数
     parser.add_argument("--oof", action="store_true", help="OOF 交叉验证模式")
@@ -427,16 +445,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--oof-output", type=Path, default=None, help="OOF 预测输出路径")
     parser.add_argument("--late-weight", type=float, default=2.0, help="预测偏晚惩罚权重")
     # CUDA / 性能
-    parser.add_argument("--num-workers", type=int, default=0, help="DataLoader workers")
+    parser.add_argument("--num-workers", type=int, default=4, help="DataLoader workers")
     parser.add_argument("--pin-memory", action="store_true", default=True, help="pin_memory 加速")
     parser.add_argument("--no-pin-memory", dest="pin_memory", action="store_false",
                         help="禁用 pin_memory")
-    parser.add_argument("--use-torch-compile", action="store_true", help="torch.compile 加速")
+    parser.add_argument("--use-torch-compile", action="store_true", default=True,
+                        help="torch.compile 加速 (默认启用)")
+    parser.add_argument("--no-torch-compile", dest="use_torch_compile", action="store_false",
+                        help="禁用 torch.compile")
+    parser.add_argument("--amp", dest="use_amp", action="store_true", default=True,
+                        help="自动混合精度训练 (默认启用)")
+    parser.add_argument("--no-amp", dest="use_amp", action="store_false",
+                        help="禁用 AMP，使用纯 FP32")
     parser.add_argument("--cuda-deterministic", action="store_true",
                         help="cudnn deterministic 可复现模式")
     parser.add_argument("--cuda-allow-tf32", action="store_true", default=True,
                         help="允许 TF32 (Ampere+ GPU)")
-    parser.add_argument("--cuda-matmul-precision", type=str, default="high",
+    parser.add_argument("--cuda-matmul-precision", type=str, default="medium",
                         choices=["highest", "high", "medium"])
     return parser.parse_args()
 
@@ -572,6 +597,7 @@ def main() -> None:
     best_val_mag_rmse = float("inf")
     save_dir = resolve_project_path(args.save_dir)
 
+    use_amp = getattr(args, "use_amp", True)
     epoch_iter = tqdm(range(1, args.epochs + 1), desc="DL 训练 epochs", unit="epoch")
     for epoch in epoch_iter:
         train_loss = train_one_epoch(
@@ -580,8 +606,9 @@ def main() -> None:
             optimizer,
             device,
             late_weight=args.late_weight,
+            use_amp=use_amp,
         )
-        val_metrics = evaluate_model(model, val_loader, device, late_weight=args.late_weight)
+        val_metrics = evaluate_model(model, val_loader, device, late_weight=args.late_weight, use_amp=use_amp)
         scheduler.step()
         epoch_iter.set_postfix(
             loss=f"{train_loss:.4f}",

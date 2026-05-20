@@ -267,6 +267,94 @@ def compute_ensemble_metrics(
     )
 
 
+def search_ridge_stacking_weights(
+    merged: pd.DataFrame,
+    available: list[str],
+    target_idx: int,
+    late_weight: float,
+) -> tuple[dict[str, float], float]:
+    """使用 Ridge 回归 (带非负约束) 学习 stacking 权重。
+
+    相比 simplex 网格搜索，Ridge stacking 可以学到更精细的权重分配，
+    且通过 L2 正则化防止过拟合。
+
+    Args:
+        merged: 合并的 OOF DataFrame
+        available: 可用模型列表
+        target_idx: 0=mag, 1=time
+        late_weight: 时间目标预测偏晚惩罚
+
+    Returns:
+        (权重 dict, 最优 objective 值)
+    """
+    from sklearn.linear_model import Ridge
+    from sklearn.preprocessing import StandardScaler
+
+    pred_cols = [MODEL_PRED_COLS[m][target_idx] for m in available]
+    X_stack = merged[pred_cols].to_numpy(dtype=float)
+    y_true = merged[TARGET_COLS[target_idx]].to_numpy(dtype=float)
+
+    if len(available) <= 1:
+        return {available[0]: 1.0}, float(
+            np.sqrt(np.mean((X_stack[:, 0] - y_true) ** 2))
+        )
+
+    # 标准化输入
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_stack)
+
+    # 时间目标: 对正误差加权
+    if target_idx == 1:  # time
+        sample_weight = np.ones(len(y_true))
+        residuals = np.zeros(len(y_true))
+        # 先用等权融合的残差方向来确定 sample_weight
+        mean_pred = X_stack.mean(axis=1)
+        residuals = mean_pred - y_true
+        sample_weight = np.where(residuals > 0, late_weight, 1.0)
+    else:
+        sample_weight = np.ones(len(y_true))
+
+    # Ridge 回归，对正系数非负约束 (通过多次尝试不同的 alpha)
+    best_weights = None
+    best_objective = float("inf")
+
+    for alpha in [0.01, 0.1, 1.0, 10.0, 100.0]:
+        ridge = Ridge(alpha=alpha, fit_intercept=False, positive=True)
+        ridge.fit(X_scaled, y_true, sample_weight=sample_weight)
+        # 恢复原始尺度的系数
+        w_raw = ridge.coef_ / scaler.scale_
+        w_sum = w_raw.sum()
+        if w_sum <= 0:
+            continue
+        w_norm = w_raw / w_sum
+        pred = X_stack @ w_norm
+
+        if target_idx == 0:
+            obj = float(np.sqrt(np.mean((pred - y_true) ** 2)))
+        else:
+            time_err = pred - y_true
+            time_w = np.where(time_err > 0, late_weight, 1.0)
+            obj = float(np.sqrt(np.mean(time_w * time_err ** 2)))
+
+        if obj < best_objective:
+            best_objective = obj
+            best_weights = {available[i]: round(float(w_norm[i]), 4)
+                           for i in range(len(available))}
+
+    # Fallback: 如果 Ridge 没有找到更好结果，用等权
+    if best_weights is None:
+        best_weights = {m: round(1.0 / len(available), 4) for m in available}
+        pred = X_stack @ np.array(list(best_weights.values()))
+        if target_idx == 0:
+            best_objective = float(np.sqrt(np.mean((pred - y_true) ** 2)))
+        else:
+            time_err = pred - y_true
+            time_w = np.where(time_err > 0, late_weight, 1.0)
+            best_objective = float(np.sqrt(np.mean(time_w * time_err ** 2)))
+
+    return best_weights, best_objective
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="多模型 OOF 融合权重搜索")
     parser.add_argument(
@@ -310,22 +398,42 @@ def main() -> None:
 
     # 2. 搜索震级权重
     print("\n--- 震级权重搜索 (minimize mag_rmse) ---")
-    mag_weights, mag_best = search_weights_for_target(
+
+    # 同时运行两种方法
+    mag_weights_grid, mag_best_grid = search_weights_for_target(
         merged, available, target_idx=0,
         late_weight=args.late_weight, grid_step=args.grid_step,
     )
-    for m, w in mag_weights.items():
-        print(f"  {m}: {w:.4f}")
+    mag_weights_ridge, mag_best_ridge = search_ridge_stacking_weights(
+        merged, available, target_idx=0, late_weight=args.late_weight,
+    )
+
+    # 选择更优的方法
+    mag_weights = mag_weights_grid if mag_best_grid <= mag_best_ridge else mag_weights_ridge
+    mag_best = min(mag_best_grid, mag_best_ridge)
+    mag_method = "grid" if mag_best_grid <= mag_best_ridge else "ridge"
+    print(f"  Grid:  {mag_best_grid:.4f}  {mag_weights_grid}")
+    print(f"  Ridge: {mag_best_ridge:.4f}  {mag_weights_ridge}")
+    print(f"  选用 [{mag_method}] 权重: {mag_weights}")
     print(f"  最优 mag_rmse: {mag_best:.4f}")
 
     # 3. 搜索时间权重
     print("\n--- 时间权重搜索 (minimize time_asymmetric_rmse) ---")
-    time_weights, time_best = search_weights_for_target(
+
+    time_weights_grid, time_best_grid = search_weights_for_target(
         merged, available, target_idx=1,
         late_weight=args.late_weight, grid_step=args.grid_step,
     )
-    for m, w in time_weights.items():
-        print(f"  {m}: {w:.4f}")
+    time_weights_ridge, time_best_ridge = search_ridge_stacking_weights(
+        merged, available, target_idx=1, late_weight=args.late_weight,
+    )
+
+    time_weights = time_weights_grid if time_best_grid <= time_best_ridge else time_weights_ridge
+    time_best = min(time_best_grid, time_best_ridge)
+    time_method = "grid" if time_best_grid <= time_best_ridge else "ridge"
+    print(f"  Grid:  {time_best_grid:.4f}  {time_weights_grid}")
+    print(f"  Ridge: {time_best_ridge:.4f}  {time_weights_ridge}")
+    print(f"  选用 [{time_method}] 权重: {time_weights}")
     print(f"  最优 time_asymmetric_rmse: {time_best:.4f}")
 
     # 4. 计算融合指标

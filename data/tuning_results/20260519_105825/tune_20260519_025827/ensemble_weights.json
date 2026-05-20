@@ -1,0 +1,14 @@
+{
+  "mag": {
+    "baseline": 0.38,
+    "xgboost": 0.06,
+    "dl": 0.56,
+    "gnn": 0.0
+  },
+  "time": {
+    "baseline": 0.14,
+    "xgboost": 0.56,
+    "dl": 0.0,
+    "gnn": 0.3
+  }
+}

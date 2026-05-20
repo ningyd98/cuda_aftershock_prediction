@@ -105,7 +105,7 @@ class Seq2SeqAftershockPredictor(nn.Module):
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(fusion_hidden_dim, output_dim),
-            nn.Softplus(),
+            nn.ReLU(),
         )
 
     def forward(

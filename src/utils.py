@@ -105,11 +105,22 @@ def get_torch_device(device_str: str = "auto") -> "torch.device":
     if normalized in ("cuda", "gpu"):
         if _is_cuda_available():
             return torch.device("cuda")
-        raise RuntimeError("CUDA 不可用，无法使用 --device cuda")
+        # 优雅回退：打印醒目的警告后回退到最佳可用设备
+        print("=" * 60)
+        print("⚠ ⚠ ⚠  CUDA 不可用但已请求 --device cuda")
+        print("  将自动回退到最佳可用设备 (MPS → CPU)")
+        print("  请检查: nvidia-smi, CUDA 驱动, PyTorch CUDA 编译版本")
+        print("=" * 60)
+        if torch.backends.mps.is_available():
+            print("→ 回退到 MPS (Apple Silicon)")
+            return torch.device("mps")
+        print("→ 回退到 CPU")
+        return torch.device("cpu")
     if normalized == "mps":
         if torch.backends.mps.is_available():
             return torch.device("mps")
-        raise RuntimeError("MPS 不可用，无法使用 --device mps")
+        print("⚠ MPS 不可用，回退到 CPU")
+        return torch.device("cpu")
     if normalized == "cpu":
         return torch.device("cpu")
     # auto: CUDA → MPS → CPU
@@ -233,19 +244,30 @@ def _is_lightgbm_cuda_available() -> bool:
         return False
 
     try:
+        import os
         import numpy as np
         import lightgbm as lgb
 
-        X = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
-        y = np.array([1.0, 2.0], dtype=np.float32)
-        ds = lgb.Dataset(X, label=y, params={"verbose": -1})
-        lgb.train(
-            {"device": "cuda", "num_leaves": 2, "verbose": -1, "num_threads": 1},
-            ds,
-            num_boost_round=1,
-        )
-        _lightgbm_cuda_cache = True
-        return True
+        # 重定向 stderr 以抑制 LightGBM 的 "CUDA Tree Learner was not enabled" 报错
+        # 这个报错来自 C++ 层，无法通过 Python logging 控制
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        old_stderr = os.dup(2)
+        os.dup2(devnull, 2)
+        os.close(devnull)
+        try:
+            X = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+            y = np.array([1.0, 2.0], dtype=np.float32)
+            ds = lgb.Dataset(X, label=y, params={"verbose": -1})
+            lgb.train(
+                {"device": "cuda", "num_leaves": 2, "verbose": -1, "num_threads": 1},
+                ds,
+                num_boost_round=1,
+            )
+            _lightgbm_cuda_cache = True
+            return True
+        finally:
+            os.dup2(old_stderr, 2)
+            os.close(old_stderr)
     except Exception:
         _lightgbm_cuda_cache = False
         return False

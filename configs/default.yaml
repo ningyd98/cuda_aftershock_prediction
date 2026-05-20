@@ -99,7 +99,7 @@ transformer:
   early_stopping_min_delta: 0.001
 
   # --- CUDA / 性能 ---
-  device: auto               # auto / cuda / cpu
+  device: cuda               # auto / cuda / cpu
   num_workers: 0             # DataLoader workers (0=主进程, >0=多进程预加载)
   pin_memory: true           # pin_memory 加速 CPU→GPU 数据传输
   use_torch_compile: false   # torch.compile (PyTorch >= 2.0)
@@ -141,7 +141,7 @@ gnn:
   purge_days: 30.0
 
   # --- CUDA / 性能 ---
-  device: auto
+  device: cuda
   num_workers: 0
   pin_memory: true
   use_torch_compile: false
@@ -150,7 +150,7 @@ gnn:
 #  LightGBM 树模型配置
 # ============================================================
 lightgbm:
-  device: auto               # auto / cuda / cpu
+  device: cuda               # auto / cuda / cpu
   gpu_use_dp: false          # GPU 双精度模式
 
 # ============================================================

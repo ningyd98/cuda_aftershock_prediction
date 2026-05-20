@@ -8,6 +8,7 @@
 #    ./run.sh --skip-download --with-gnn   # 额外训练 ST-GNN
 #    ./run.sh --skip-download --with-deep  # 同时训练 Transformer + ST-GNN
 #    ./run.sh --train-oof-ensemble         # 全模型 OOF 融合（含深度模型）
+#    ./run.sh --realtime                   # 实时监控全球强震 + 自动推理
 #    ./run.sh --no-gating                  # 生成提交时关闭自动门控
 #    ./run.sh --no-install                 # 跳过 pip install（依赖已就绪）
 #    ./run.sh --install                    # 强制重新安装依赖
@@ -71,6 +72,11 @@ show_usage() {
   --with-gcmt         下载/使用 Global CMT 震源机制解
   --mock-eval         运行模拟线上评测
   --train-oof-ensemble 全模型 OOF 融合 (树+DL+GNN)，输出双目标权重
+  --tune              树模型超参数调优 (LightGBM + XGBoost)
+  --tune-full         全模型联合调优 (LGB + XGB + Transformer + GNN)
+  --tune-fast         快速全模型调优 (减少 DL/GNN 训练轮数)
+  --tune-trials N     指定 Optuna 试验次数 (默认 100)
+  --realtime          实时监控全球 Mw≥6.0 强震并自动推理余震
   --no-gating         生成提交时关闭自动两阶段门控
   --reset-ensemble-weights 强制重写 ensemble_weights.json
   --analyze-transformer Transformer 模型分析与可解释性
@@ -91,8 +97,14 @@ FORCE_INSTALL=false
 TRAIN_OOF_ENSEMBLE=false
 RESET_ENSEMBLE_WEIGHTS=false
 NO_GATING=false
+TUNE_HYPERPARAMS=false
+TUNE_N_TRIALS=100
+TUNE_FULL=false
+TUNE_FAST=false
+REALTIME=false
 
-for arg in "$@"; do
+while [[ $# -gt 0 ]]; do
+    arg="$1"
     case "$arg" in
         --skip-download) SKIP_DOWNLOAD=true ;;
         --skip-dl)
@@ -109,11 +121,23 @@ for arg in "$@"; do
         --install) FORCE_INSTALL=true ;;
         --train-oof-ensemble) TRAIN_OOF_ENSEMBLE=true ;;
         --reset-ensemble-weights) RESET_ENSEMBLE_WEIGHTS=true ;;
+        --tune) TUNE_HYPERPARAMS=true ;;
+        --tune-full) TUNE_FULL=true ;;
+        --tune-fast) TUNE_FAST=true ;;
+        --realtime) REALTIME=true ;;
+        --tune-trials)
+            TUNE_N_TRIALS="$2"
+            shift
+            ;;
+        --tune-trials=*)
+            TUNE_N_TRIALS="${arg#*=}"
+            ;;
         --analyze-transformer) ;; # 已弃用，保留兼容
         train-only) TRAIN_ONLY=true ;;
         -h|--help) show_usage; exit 0 ;;
         *) error "未知参数: $arg" ;;
     esac
+    shift
 done
 
 pick_full_catalog() {
@@ -131,7 +155,8 @@ run_oof_pipeline() {
     local dl_catalog
     dl_catalog="$(pick_full_catalog)"
 
-    step "OOF-1. 树模型 OOF 交叉验证"
+    step "OOF-1. 树模型 OOF CV + DL OOF CV (并行跑)"
+    # 树模型 GPU 占用低，DL 占用高，并行不冲突
     "${PYTHON}" scripts/train_baseline.py \
         --data "$ADVANCED_FEATURES" \
         --n-splits "$OOF_N_SPLITS" \
@@ -139,29 +164,35 @@ run_oof_pipeline() {
         --n-estimators 300 \
         --learning-rate 0.03 \
         --model-type both \
-        --save-dir "$MODEL_DIR"
-    info "树模型 OOF 完成 → ${MODEL_DIR}/oof_predictions.csv"
+        --device cuda \
+        --save-dir "$MODEL_DIR" &
+    TREE_PID=$!
 
-    step "OOF-2. Transformer (DL) OOF 交叉验证"
     "${PYTHON}" scripts/train_dl.py \
         --features "$ADVANCED_FEATURES" \
         --event-catalog "$dl_catalog" \
         --epochs "$OOF_DL_EPOCHS" \
-        --batch-size 32 \
+        --batch-size 64 \
+        --num-workers 4 \
         --save-dir "$MODEL_DIR" \
-        --device auto \
+        --device cuda \
         --oof --n-splits "$OOF_N_SPLITS" --purge-days "$OOF_PURGE_DAYS" \
-        --oof-output "$MODEL_DIR/dl_oof_predictions.csv"
-    info "DL OOF 完成 → ${MODEL_DIR}/dl_oof_predictions.csv"
+        --oof-output "$MODEL_DIR/dl_oof_predictions.csv" &
+    DL_PID=$!
+
+    wait $TREE_PID && info "树模型 OOF 完成 → ${MODEL_DIR}/oof_predictions.csv"
+    wait $DL_PID   && info "DL OOF 完成 → ${MODEL_DIR}/dl_oof_predictions.csv"
 
     step "OOF-3. ST-GNN OOF 交叉验证"
     "${PYTHON}" scripts/train_gnn.py \
         --features "$ADVANCED_FEATURES" \
         --event-catalog "$dl_catalog" \
         --epochs "$OOF_GNN_EPOCHS" \
-        --batch-size 16 \
+        --batch-size 32 \
+        --num-workers 4 \
+        --no-torch-compile \
         --save-dir "$MODEL_DIR" \
-        --device auto \
+        --device cuda \
         --oof --n-splits "$OOF_N_SPLITS" --purge-days "$OOF_PURGE_DAYS" \
         --oof-output "$MODEL_DIR/gnn_oof_predictions.csv"
     info "GNN OOF 完成 → ${MODEL_DIR}/gnn_oof_predictions.csv"
@@ -174,26 +205,31 @@ run_oof_pipeline() {
     info "融合指标已保存 → ${MODEL_DIR}/ensemble_metrics.json"
     info "融合 OOF 预测 → ${MODEL_DIR}/ensemble_oof_predictions.csv"
 
-    # ---- OOF-5 & OOF-6: Full-Fit 最终模型 ----
-    step "OOF-5. 全量训练最终 Transformer"
+    # ---- OOF-5 & OOF-6: Full-Fit 最终模型 (并行) ----
+    step "OOF-5. 全量训练最终 Transformer + ST-GNN (并行)"
     "${PYTHON}" scripts/train_dl.py \
         --features "$ADVANCED_FEATURES" \
         --event-catalog "$dl_catalog" \
         --epochs "$FULL_FIT_DL_EPOCHS" \
-        --batch-size 32 \
+        --batch-size 64 \
+        --num-workers 4 \
         --save-dir "$MODEL_DIR" \
-        --device auto
-    info "最终 Transformer 已保存 → ${MODEL_DIR}/dl_model.pt"
+        --device cuda &
+    DL_FULL_PID=$!
 
-    step "OOF-6. 全量训练最终 ST-GNN"
     "${PYTHON}" scripts/train_gnn.py \
         --features "$ADVANCED_FEATURES" \
         --event-catalog "$dl_catalog" \
         --epochs "$FULL_FIT_GNN_EPOCHS" \
-        --batch-size 16 \
+        --batch-size 32 \
+        --num-workers 4 \
+        --no-torch-compile \
         --save-dir "$MODEL_DIR" \
-        --device auto
-    info "最终 ST-GNN 已保存 → ${MODEL_DIR}/gnn_model.pt"
+        --device cuda &
+    GNN_FULL_PID=$!
+
+    wait $DL_FULL_PID  && info "最终 Transformer 已保存 → ${MODEL_DIR}/dl_model.pt"
+    wait $GNN_FULL_PID && info "最终 ST-GNN 已保存 → ${MODEL_DIR}/gnn_model.pt"
 }
 
 step "0. 环境检查"
@@ -202,15 +238,71 @@ info "Python: ${PYTHON}"
 
 step "1. 安装 Python 依赖"
 if [ "$FORCE_INSTALL" = true ]; then
-    info "强制重新安装依赖..."
-    "${PYTHON}" -m pip install -r requirements.txt
+    info "强制重新安装依赖 (pip, 跳过 lightgbm 以避免覆盖 conda CUDA 构建)..."
+    grep -v '^lightgbm' requirements.txt | "${PYTHON}" -m pip install -r /dev/stdin
 elif [ "$NO_INSTALL" = true ]; then
     info "跳过依赖安装 (--no-install)"
 else
     info "检查依赖..."
     "${PYTHON}" -c "import numpy, pandas, scipy, yaml, joblib, tqdm, requests, sklearn, lightgbm, xgboost, torch" 2>/dev/null && \
         info "依赖已就绪 ✓" || \
-        { warn "依赖缺失，自动安装..."; "${PYTHON}" -m pip install -r requirements.txt -q; info "依赖安装完成 ✓"; }
+        { warn "依赖缺失，自动安装 (跳过 lightgbm)..."; \
+          grep -v '^lightgbm' requirements.txt | "${PYTHON}" -m pip install -r /dev/stdin -q; \
+          info "依赖安装完成 ✓"; }
+fi
+
+# ---- 超参数调优模式 (提前跳出) ----
+if [ "$TUNE_HYPERPARAMS" = true ] || [ "$TUNE_FULL" = true ] || [ "$TUNE_FAST" = true ]; then
+    [ -f "$ADVANCED_FEATURES" ] || error "调优需要已存在高级特征: ${ADVANCED_FEATURES}"
+
+    if [ "$TUNE_FULL" = true ]; then
+        MODE_LABEL="全模型联合调优 (LightGBM + XGBoost + Transformer + ST-GNN)"
+        MODE_FLAG=""
+    elif [ "$TUNE_FAST" = true ]; then
+        MODE_LABEL="快速全模型联合调优 (减少 DL/GNN epochs)"
+        MODE_FLAG="--fast"
+    else
+        MODE_LABEL="树模型调优 (LightGBM + XGBoost)"
+        MODE_FLAG="--no-dl --no-gnn"
+    fi
+
+    step "TUNE. ${MODE_LABEL}"
+    info "试验次数: ${TUNE_N_TRIALS}"
+    info "该过程可能耗时数小时，请耐心等待 …"
+
+    TUNE_OUTPUT_DIR="data/tuning_results/$(date +%Y%m%d_%H%M%S)"
+    "${PYTHON}" scripts/tune_all_models.py \
+        --n-trials "$TUNE_N_TRIALS" \
+        --n-estimators 300 \
+        --late-weight 2.0 \
+        --study-name "aftershock_tune_$(date +%Y%m%d)" \
+        --output-dir "$TUNE_OUTPUT_DIR" \
+        --eval-holdout-every 10 \
+        --device cuda \
+        ${MODE_FLAG}
+
+    info ""
+    info "调优完成！结果目录: ${TUNE_OUTPUT_DIR}"
+    info "  best_params.json       → 最优超参数"
+    info "  ensemble_weights.json  → 最优融合权重"
+    info "  holdout_predictions.csv → holdout 预测 vs 真实"
+    info "  trials_history.csv      → 所有 trial 记录"
+    info "  tuning_stats.json       → 调优统计汇总"
+    info ""
+    info "使用最优参数重新训练:"
+    info "  cat ${TUNE_OUTPUT_DIR}/best_params.json"
+    info "  cat ${TUNE_OUTPUT_DIR}/ensemble_weights.json"
+    exit 0
+fi
+
+# ---- 实时监控模式 (提前跳出) ----
+if [ "$REALTIME" = true ]; then
+    step "REALTIME. 实时监控全球强震 + 自动推理"
+    info "轮询间隔: 300s, 震级阈值: Mw≥6.0"
+    info "产物: data/processed/realtime_predictions.csv"
+    info ""
+    "${PYTHON}" scripts/realtime_monitor.py --device cuda
+    exit 0
 fi
 
 if [ "$TRAIN_ONLY" = false ] && [ "$SKIP_DOWNLOAD" = false ]; then
@@ -337,33 +429,61 @@ step "5. 训练 LightGBM + XGBoost 树模型"
     --learning-rate 0.02 \
     --model-type both \
     --use-asymmetric-time-objective \
+    --device cuda \
     --save-dir "$MODEL_DIR"
 info "树模型训练完成 ✓"
 
 # ---- 常规 DL/GNN 训练 ----
 DL_CATALOG="$(pick_full_catalog)"
-if [ "$WITH_DL" = true ]; then
-    step "5b. 训练 Transformer 深度模型"
+if [ "$WITH_DL" = true ] && [ "$WITH_GNN" = true ]; then
+    step "5b. 训练 Transformer + ST-GNN 深度模型 (并行)"
     "${PYTHON}" scripts/train_dl.py \
         --features "$ADVANCED_FEATURES" \
         --event-catalog "$DL_CATALOG" \
         --epochs 50 \
-        --batch-size 32 \
+        --batch-size 64 \
+        --num-workers 4 \
         --save-dir "$MODEL_DIR" \
-        --device auto
-    info "Transformer 训练完成 ✓"
-fi
-
-if [ "$WITH_GNN" = true ]; then
-    step "5c. 训练 ST-GNN 深度模型"
+        --device cuda &
+    DL_PID=$!
     "${PYTHON}" scripts/train_gnn.py \
         --features "$ADVANCED_FEATURES" \
         --event-catalog "$DL_CATALOG" \
         --epochs 50 \
-        --batch-size 16 \
+        --batch-size 32 \
+        --num-workers 4 \
+        --no-torch-compile \
         --save-dir "$MODEL_DIR" \
-        --device auto
-    info "ST-GNN 训练完成 ✓"
+        --device cuda &
+    GNN_PID=$!
+    wait $DL_PID  && info "Transformer 训练完成 ✓"
+    wait $GNN_PID && info "ST-GNN 训练完成 ✓"
+else
+    if [ "$WITH_DL" = true ]; then
+        step "5b. 训练 Transformer 深度模型"
+        "${PYTHON}" scripts/train_dl.py \
+            --features "$ADVANCED_FEATURES" \
+            --event-catalog "$DL_CATALOG" \
+            --epochs 50 \
+            --batch-size 64 \
+            --num-workers 4 \
+            --save-dir "$MODEL_DIR" \
+            --device cuda
+        info "Transformer 训练完成 ✓"
+    fi
+    if [ "$WITH_GNN" = true ]; then
+        step "5c. 训练 ST-GNN 深度模型"
+        "${PYTHON}" scripts/train_gnn.py \
+            --features "$ADVANCED_FEATURES" \
+            --event-catalog "$DL_CATALOG" \
+            --epochs 50 \
+            --batch-size 32 \
+            --num-workers 4 \
+            --no-torch-compile \
+            --save-dir "$MODEL_DIR" \
+            --device cuda
+        info "ST-GNN 训练完成 ✓"
+    fi
 fi
 
 # ---- 常规模式：更新融合权重 (仅当没有 OOF 双目标权重时) ----

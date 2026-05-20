@@ -11,6 +11,7 @@ from sklearn.preprocessing import RobustScaler, StandardScaler
 
 from src.utils import haversine_km
 
+_GLOBAL_RAW_SEQ_CACHE = {}  # 缓存 (mainshock_id -> raw_seq_x_tensor) 避免调优时重复查询事件特征
 
 DOMAIN_PRIOR_FILL_VALUES = {
     "gr_b_value": 1.0,
@@ -133,7 +134,17 @@ class EarthquakeSequenceDataset(Dataset):
             "distance_km",
             "depth",
             "mag",
+            "azimuth_rad",
+            "mag_diff",
+            "inter_event_interval_hours",
+            "local_b_value_proxy",
+            "normalized_energy",
         ]
+        # 关键列的索引常量（graph_time_days / graph_coords_km 提取用）
+        self._IDX_DT_DAYS = 0
+        self._IDX_REL_X = 2
+        self._IDX_REL_Y = 3
+        self._IDX_MAG = 6
         self._validate_columns()
         self._configure_preprocessors(
             preprocessors=preprocessors,
@@ -150,12 +161,20 @@ class EarthquakeSequenceDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         row = self.sequence_df.iloc[idx]
-        early_events = self._extract_early_events(row)
-        raw_seq_x = self._build_event_tensor(early_events, row)
+        main_id = row.get("mainshock_id", str(idx))
+        
+        if main_id not in _GLOBAL_RAW_SEQ_CACHE:
+            early_events = self._extract_early_events(row)
+            _GLOBAL_RAW_SEQ_CACHE[main_id] = self._build_event_tensor(early_events, row)
+            
+        raw_seq_x = _GLOBAL_RAW_SEQ_CACHE[main_id]
+        
         seq_x = self._transform_event_tensor(raw_seq_x)
-        graph_time_days = raw_seq_x[:, 0] if len(raw_seq_x) else np.zeros(0, dtype=np.float32)
+        graph_time_days = (
+            raw_seq_x[:, self._IDX_DT_DAYS] if len(raw_seq_x) else np.zeros(0, dtype=np.float32)
+        )
         graph_coords_km = (
-            raw_seq_x[:, 2:4]
+            raw_seq_x[:, self._IDX_REL_X:self._IDX_REL_Y + 1]
             if len(raw_seq_x)
             else np.zeros((0, 2), dtype=np.float32)
         )
@@ -327,9 +346,10 @@ class EarthquakeSequenceDataset(Dataset):
         return candidates.sort_values("time").head(self.config.max_seq_len)
 
     def _build_event_tensor(self, events: pd.DataFrame, row: pd.Series) -> np.ndarray:
-        """把早期余震事件表转换为 Transformer 输入张量。"""
+        """把早期余震事件表转换为 12 维深度学习输入张量。"""
+        n_features = len(self.event_feature_cols)
         if events.empty:
-            return np.zeros((0, len(self.event_feature_cols)), dtype=np.float32)
+            return np.zeros((0, n_features), dtype=np.float32)
 
         dt_days = (
             events["time"] - row["mainshock_time"]
@@ -342,6 +362,42 @@ class EarthquakeSequenceDataset(Dataset):
 
         rel_x_km = self.config.earth_radius_km * np.cos(lat0) * (lon - lon0)
         rel_y_km = self.config.earth_radius_km * (lat - lat0)
+        dists = events["distance_km"].to_numpy(dtype=float)
+        depths = events["depth"].to_numpy(dtype=float)
+        mags = events["mag"].to_numpy(dtype=float)
+        mainshock_mag = float(row["mainshock_mag"])
+
+        # ─── 新增特征1: 方位角 (相对于主震震中的极坐标角度) ───
+        azimuth = np.arctan2(rel_x_km, rel_y_km)  # 0=正北, CW
+
+        # ─── 新增特征2: 震级差 ───
+        mag_diff = mags - mainshock_mag
+
+        # ─── 新增特征3: 事件间间隔（小时） ───
+        n_events = len(dt_days)
+        inter_event_interval = np.zeros(n_events, dtype=float)
+        if n_events >= 2:
+            inter_event_interval[1:] = np.diff(dt_days) * 24.0  # days → hours
+            inter_event_interval[0] = dt_days[0] * 24.0  # 第一个事件：距主震的小时数
+
+        # ─── 新增特征4: 局部 b 值代理 (空间近邻加权平均震级偏离度) ───
+        local_b_proxy = np.zeros(n_events, dtype=float)
+        if n_events >= 3:
+            from src.utils import seismic_moment_from_mw
+            # 对每个事件计算"近邻整体震级水平"，用距离反比加权
+            for i in range(n_events):
+                # 距离近的事件权重大
+                w = np.exp(-dists[i] / max(np.median(dists), 1.0))
+                w_sum = w.sum()
+                if w_sum > 0:
+                    local_b_proxy[i] = float(1.0 / np.log(10) / (
+                        (w * mags).sum() / w_sum + 1e-12
+                    ))
+
+        # ─── 新增特征5: 归一化能量（单事件矩释放 / 序列总矩释放） ───
+        moments = 10 ** (1.5 * mags + 4.8)
+        total_moment = moments.sum()
+        norm_energy = moments / max(total_moment, 1e-12)
 
         seq = np.column_stack(
             [
@@ -349,9 +405,14 @@ class EarthquakeSequenceDataset(Dataset):
                 np.log1p(dt_days),
                 rel_x_km,
                 rel_y_km,
-                events["distance_km"].to_numpy(dtype=float),
-                events["depth"].to_numpy(dtype=float),
-                events["mag"].to_numpy(dtype=float),
+                dists,
+                depths,
+                mags,
+                azimuth,
+                mag_diff,
+                inter_event_interval,
+                local_b_proxy,
+                norm_energy,
             ]
         )
         return np.nan_to_num(seq, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)

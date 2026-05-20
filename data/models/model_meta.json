@@ -1,7 +1,7 @@
 {
-  "created_at": "2026-05-18T14:37:50.544202+00:00",
+  "created_at": "2026-05-19T13:40:40.483282+00:00",
   "training_data": "/home/ningyd/CodingSpace/aftershock_prediction/data/processed/advanced_features.csv",
-  "feature_count": 94,
+  "feature_count": 99,
   "target_cols": [
     "target_max_mag",
     "target_time_to_max_days"
@@ -10,51 +10,51 @@
   "time_col": "mainshock_time",
   "model_type": "both",
   "model_backends": {
-    "baseline": "lightgbm",
+    "baseline": "lightgbm_asymmetric_time_cuda",
     "xgboost": "xgboost"
   },
   "n_splits": 5,
   "purge_days": 30.0,
   "seed": 42,
   "late_weight": 2.0,
-  "n_estimators": 300,
-  "learning_rate": 0.03,
-  "use_asymmetric_time_objective": false,
+  "n_estimators": 500,
+  "learning_rate": 0.02,
+  "use_asymmetric_time_objective": true,
   "mean_metrics_by_model": {
     "baseline": {
       "purge_days": 30.0,
-      "mag_rmse": 0.5312925809583572,
-      "mag_mae": 0.4278471862514007,
-      "time_rmse": 8.663990499087081,
-      "time_mae": 6.789681356829919,
-      "time_asymmetric_mae": 8.667433063706454,
-      "time_asymmetric_rmse": 9.324269189578853
+      "mag_rmse": 0.5310799851640603,
+      "mag_mae": 0.4260073455068003,
+      "time_rmse": 8.331877397855282,
+      "time_mae": 6.72449382826252,
+      "time_asymmetric_mae": 9.27642199869491,
+      "time_asymmetric_rmse": 9.376689954292456
     },
     "xgboost": {
       "purge_days": 30.0,
-      "mag_rmse": 0.5249567231500291,
-      "mag_mae": 0.4228695436293079,
-      "time_rmse": 8.569621317659097,
-      "time_mae": 6.686126446516172,
-      "time_asymmetric_mae": 8.456673470277199,
-      "time_asymmetric_rmse": 9.151361362679763
+      "mag_rmse": 0.5248061129308085,
+      "mag_mae": 0.42138358199211856,
+      "time_rmse": 8.595532330523,
+      "time_mae": 6.744552789329548,
+      "time_asymmetric_mae": 8.576384578716757,
+      "time_asymmetric_rmse": 9.203632001256556
     }
   },
   "ensemble_weights": {
-    "baseline": 0.2,
-    "xgboost": 0.8,
+    "baseline": 0.14,
+    "xgboost": 0.86,
     "dl": 0.0,
     "gnn": 0.0,
-    "_mag_baseline_w": 0.2,
-    "_time_baseline_w": 0.06
+    "_mag_baseline_w": 0.14,
+    "_time_baseline_w": 0.32
   },
   "ensemble_metrics": {
-    "mag_rmse": 0.525601252635619,
-    "mag_mae": 0.42261789271714745,
-    "time_rmse": 8.56829569489912,
-    "time_mae": 6.686039614021789,
-    "time_asymmetric_mae": 8.459868855213143,
-    "time_asymmetric_rmse": 9.151848434442348,
-    "ensemble_objective": 9.677449687077967
+    "mag_rmse": 0.5257912528165871,
+    "mag_mae": 0.42111093127832305,
+    "time_rmse": 8.441741985442414,
+    "time_mae": 6.683893717869946,
+    "time_asymmetric_mae": 8.719036247232534,
+    "time_asymmetric_rmse": 9.16173001034179,
+    "ensemble_objective": 9.687521263158377
   }
 }

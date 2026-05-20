@@ -375,7 +375,7 @@ def calculate_temporal_binned_features(
 
 
 def _empty_etas_result(n_events: int) -> dict:
-    """返回统一格式的 ETAS 空结果。"""
+    """返回统一格式的 ETAS 空结果（含事件级诊断特征）。"""
     return {
         "etas_mu": np.nan,
         "etas_K0": np.nan,
@@ -385,6 +385,12 @@ def _empty_etas_result(n_events: int) -> dict:
         "etas_nll": np.nan,
         "etas_n": int(n_events),
         "etas_valid": False,
+        # 事件级诊断特征（完整 ETAS 输出）
+        "etas_branching_ratio": np.nan,
+        "etas_expected_count": np.nan,
+        "etas_triggered_fraction": np.nan,
+        "etas_triggered_mag_sum": np.nan,
+        "etas_bg_rate_total": np.nan,
     }
 
 
@@ -536,15 +542,37 @@ def estimate_etas_parameters(
 
         if result.success:
             log_mu, log_K0, alpha_hat = result.x
+            mu_hat = float(np.exp(log_mu))
+            K0_hat = float(np.exp(log_K0))
+            A_hat = K0_hat * np.exp(alpha_hat * (_mainshock_mag - mc))
+
+            # ─── 计算事件级诊断特征 ───
+            # triggered_contrib[i] = A / (t_i + c)^p，即触发强度在时刻t_i的贡献
+            triggered_contrib = A_hat / (elapsed_days + c_hat) ** p_hat
+            lambda_vals = mu_hat + triggered_contrib
+            # 每个事件"被触发"的贝叶斯后验概率
+            prob_triggered = triggered_contrib / np.maximum(lambda_vals, 1e-12)
+            branching_ratio = float(A_hat * omori_integral(0.0, obs_days, p_hat, c_hat)
+                                    / max(mu_hat * obs_days + A_hat * omori_integral(0.0, obs_days, p_hat, c_hat), 1e-12))
+            expected_count = float(mu_hat * obs_days + A_hat * omori_integral(0.0, obs_days, p_hat, c_hat))
+            triggered_fraction = float(np.mean(prob_triggered))
+            triggered_mag_sum = float(np.sum(prob_triggered * mags_in_window[:len(prob_triggered)]))
+
             return {
-                "etas_mu": float(np.exp(log_mu)),
-                "etas_K0": float(np.exp(log_K0)),
+                "etas_mu": mu_hat,
+                "etas_K0": K0_hat,
                 "etas_alpha": float(alpha_hat),
                 "etas_c": float(c_hat),
                 "etas_p": float(p_hat),
                 "etas_nll": float(result.fun),
                 "etas_n": int(n_events),
                 "etas_valid": True,
+                # 事件级诊断特征
+                "etas_branching_ratio": branching_ratio,
+                "etas_expected_count": expected_count,
+                "etas_triggered_fraction": triggered_fraction,
+                "etas_triggered_mag_sum": triggered_mag_sum,
+                "etas_bg_rate_total": float(mu_hat * obs_days),
             }
         else:
             return _empty_etas_result(n_events)

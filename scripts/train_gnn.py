@@ -64,9 +64,12 @@ def select_global_feature_cols(df: pd.DataFrame) -> list[str]:
     return candidates
 
 
-def train_one_epoch(model, dataloader, optimizer, device, late_weight=2.0):
+def train_one_epoch(model, dataloader, optimizer, device, late_weight=2.0, use_amp=True):
     model.train()
     total_loss, n_batches = 0.0, 0
+    use_amp = use_amp and device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda") if use_amp else None
+
     for batch in dataloader:
         seq_x = batch["seq_x"].to(device)
         global_x = batch["global_x"].to(device)
@@ -75,42 +78,55 @@ def train_one_epoch(model, dataloader, optimizer, device, late_weight=2.0):
         y = batch["y"].to(device)
         mask = batch["seq_padding_mask"].to(device)
         optimizer.zero_grad()
-        preds = model(
-            seq_x,
-            global_x,
-            mask,
-            graph_coords_km=graph_coords_km,
-            graph_time_days=graph_time_days,
-        )
-        loss = stgnn_asymmetric_loss(preds, y, late_weight=late_weight)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
+
+        with torch.amp.autocast("cuda", enabled=use_amp, dtype=torch.bfloat16):
+            preds = model(
+                seq_x,
+                global_x,
+                mask,
+                graph_coords_km=graph_coords_km,
+                graph_time_days=graph_time_days,
+            )
+            loss = stgnn_asymmetric_loss(preds, y, late_weight=late_weight)
+
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
         total_loss += loss.item()
         n_batches += 1
     return total_loss / max(n_batches, 1)
 
 
 @torch.no_grad()
-def evaluate_model(model, dataloader, device, late_weight=2.0):
+def evaluate_model(model, dataloader, device, late_weight=2.0, use_amp=True):
     model.eval()
     all_preds, all_targets = [], []
-    for batch in dataloader:
-        seq_x = batch["seq_x"].to(device)
-        global_x = batch["global_x"].to(device)
-        graph_coords_km = batch["graph_coords_km"].to(device)
-        graph_time_days = batch["graph_time_days"].to(device)
-        y = batch["y"].to(device)
-        mask = batch["seq_padding_mask"].to(device)
-        preds = model(
-            seq_x,
-            global_x,
-            mask,
-            graph_coords_km=graph_coords_km,
-            graph_time_days=graph_time_days,
-        )
-        all_preds.append(preds.cpu().numpy())
-        all_targets.append(y.cpu().numpy())
+    use_amp = use_amp and device.type == "cuda"
+    with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp):
+        for batch in dataloader:
+            seq_x = batch["seq_x"].to(device)
+            global_x = batch["global_x"].to(device)
+            graph_coords_km = batch["graph_coords_km"].to(device)
+            graph_time_days = batch["graph_time_days"].to(device)
+            y = batch["y"].to(device)
+            mask = batch["seq_padding_mask"].to(device)
+            preds = model(
+                seq_x,
+                global_x,
+                mask,
+                graph_coords_km=graph_coords_km,
+                graph_time_days=graph_time_days,
+            )
+            all_preds.append(preds.cpu().numpy())
+            all_targets.append(y.cpu().numpy())
     preds_arr = np.clip(np.concatenate(all_preds, axis=0), a_min=0.0, a_max=None)
     targets_arr = np.concatenate(all_targets, axis=0)
     preds_eval = preds_arr.copy()
@@ -229,6 +245,7 @@ def _run_oof_for_gnn(
         best_val_loss = float("inf")
         best_state = None
 
+        use_amp = getattr(args, "use_amp", True)
         epoch_iter = tqdm(
             range(1, args.epochs + 1),
             desc=f"GNN Fold {fold_idx} epochs",
@@ -242,10 +259,11 @@ def _run_oof_for_gnn(
                 optimizer,
                 device,
                 late_weight=args.late_weight,
+                use_amp=use_amp,
             )
             model.eval()
             val_loss_total, val_count = 0.0, 0
-            with torch.no_grad():
+            with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp and device.type == "cuda"):
                 for batch in valid_loader:
                     sx = batch["seq_x"].to(device)
                     gx = batch["global_x"].to(device)
@@ -277,7 +295,7 @@ def _run_oof_for_gnn(
         model.eval()
 
         all_preds, all_targets = [], []
-        with torch.no_grad():
+        with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp and device.type == "cuda"):
             for batch in tqdm(
                 valid_loader,
                 desc=f"GNN Fold {fold_idx} OOF预测",
@@ -331,14 +349,14 @@ def parse_args():
     parser.add_argument("--features", type=Path, default=PROJECT_ROOT / "data" / "processed" / "advanced_features.csv")
     parser.add_argument("--event-catalog", type=Path, default=PROJECT_ROOT / "data" / "raw" / "USGS_Mw4.5_Depth70_1970-2023.csv")
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--node-hidden", type=int, default=64)
     parser.add_argument("--gnn-layers", type=int, default=3)
     parser.add_argument("--gnn-radius-km", type=float, default=100.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save-dir", type=Path, default=PROJECT_ROOT / "data" / "models")
-    parser.add_argument("--device", type=str, default="auto",
+    parser.add_argument("--device", type=str, default="cuda",
                         help="设备: auto, cuda, mps, cpu")
     # OOF 模式参数
     parser.add_argument("--oof", action="store_true", help="OOF 交叉验证模式")
@@ -347,16 +365,23 @@ def parse_args():
     parser.add_argument("--oof-output", type=Path, default=None, help="OOF 预测输出路径")
     parser.add_argument("--late-weight", type=float, default=2.0, help="预测偏晚惩罚权重")
     # CUDA / 性能
-    parser.add_argument("--num-workers", type=int, default=0, help="DataLoader workers")
+    parser.add_argument("--num-workers", type=int, default=4, help="DataLoader workers")
     parser.add_argument("--pin-memory", action="store_true", default=True, help="pin_memory 加速")
     parser.add_argument("--no-pin-memory", dest="pin_memory", action="store_false",
                         help="禁用 pin_memory")
-    parser.add_argument("--use-torch-compile", action="store_true", help="torch.compile 加速")
+    parser.add_argument("--use-torch-compile", action="store_true", default=True,
+                        help="torch.compile 加速 (默认启用)")
+    parser.add_argument("--no-torch-compile", dest="use_torch_compile", action="store_false",
+                        help="禁用 torch.compile")
+    parser.add_argument("--amp", dest="use_amp", action="store_true", default=True,
+                        help="自动混合精度训练 (默认启用)")
+    parser.add_argument("--no-amp", dest="use_amp", action="store_false",
+                        help="禁用 AMP，使用纯 FP32")
     parser.add_argument("--cuda-deterministic", action="store_true",
                         help="cudnn deterministic 可复现模式")
     parser.add_argument("--cuda-allow-tf32", action="store_true", default=True,
                         help="允许 TF32 (Ampere+ GPU)")
-    parser.add_argument("--cuda-matmul-precision", type=str, default="high",
+    parser.add_argument("--cuda-matmul-precision", type=str, default="medium",
                         choices=["highest", "high", "medium"])
     return parser.parse_args()
 
@@ -484,6 +509,7 @@ def main():
     best_mag_rmse = float("inf")
     save_dir = resolve_project_path(args.save_dir)
 
+    use_amp = getattr(args, "use_amp", True)
     epoch_iter = tqdm(range(1, args.epochs + 1), desc="GNN 训练 epochs", unit="epoch")
     for epoch in epoch_iter:
         train_loss = train_one_epoch(
@@ -492,8 +518,9 @@ def main():
             optimizer,
             device,
             late_weight=args.late_weight,
+            use_amp=use_amp,
         )
-        val_metrics = evaluate_model(model, val_loader, device, late_weight=args.late_weight)
+        val_metrics = evaluate_model(model, val_loader, device, late_weight=args.late_weight, use_amp=use_amp)
         scheduler.step()
         epoch_iter.set_postfix(
             loss=f"{train_loss:.4f}",

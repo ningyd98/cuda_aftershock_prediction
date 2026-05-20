@@ -13,7 +13,9 @@ class SpatialGraphConv(nn.Module):
     邻接矩阵使用 A[target, source] 约定：
     - 距离 d(target, source) < radius_km
     - time[source] < time[target]
-    - 权重为 exp(-d² / (2σ²))，按 target 行归一化
+    - 权重 = exp(-d²/(2σ²)) · exp(magnitude_alpha · (M_source - Mc))
+      震级越大的 source 事件对邻域影响越大，对应 ETAS 模型的物理机制
+    - 按 target 行归一化
     """
 
     def __init__(
@@ -22,11 +24,20 @@ class SpatialGraphConv(nn.Module):
         out_dim: int,
         sigma: float = 50.0,
         radius_km: float = 100.0,
+        mc: float = 2.5,
     ) -> None:
         super().__init__()
         self.sigma = sigma
         self.radius_km = radius_km
+        self.mc = mc
         self.linear = nn.Linear(in_dim, out_dim)
+        # 可学习的震级影响系数（softplus 保证非负）
+        self.magnitude_alpha_raw = nn.Parameter(torch.tensor(0.5))
+
+    @property
+    def magnitude_alpha(self) -> torch.Tensor:
+        """Softplus 约束保证 alpha >= 0。"""
+        return torch.nn.functional.softplus(self.magnitude_alpha_raw)
 
     def forward(
         self,
@@ -34,6 +45,7 @@ class SpatialGraphConv(nn.Module):
         coords: torch.Tensor,
         event_times: torch.Tensor | None,
         mask: torch.Tensor,
+        event_mags: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -41,6 +53,7 @@ class SpatialGraphConv(nn.Module):
             coords: (B, N, 2) node spatial coordinates in km
             event_times: (B, N) elapsed days after mainshock
             mask: (B, N) True = padding
+            event_mags: (B, N) event magnitudes for magnitude-aware edge weights (optional)
         Returns:
             (B, N, D_out) updated node features
         """
@@ -51,6 +64,15 @@ class SpatialGraphConv(nn.Module):
 
         adj = torch.exp(-(dists ** 2) / (2 * self.sigma ** 2))  # (B, N, N)
         adj = adj * (dists < self.radius_km).float()
+
+        # ─── 震级感知边权重：对应 ETAS 触发能力 ∝ exp(α·(M - Mc)) ───
+        if event_mags is not None:
+            # source 震级 (B, 1, N) 对每条边的 source 端加权
+            source_mags = event_mags.unsqueeze(1)  # (B, 1, N)
+            mag_weight = torch.exp(
+                self.magnitude_alpha * (source_mags - self.mc)
+            )  # (B, 1, N)
+            adj = adj * mag_weight  # broadcast: (B, N, N) * (B, 1, N) → (B, N, N)
 
         if event_times is not None:
             # A[target, source]，只允许过去 source 指向未来 target。
@@ -83,7 +105,7 @@ class TemporalGRU(nn.Module):
             in_dim, hidden_dim, num_layers=num_layers,
             batch_first=True, bidirectional=True,
         )
-        self.proj = nn.Linear(hidden_dim * 2, hidden_dim)
+        self.proj = nn.Linear(hidden_dim * 2, in_dim)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """
@@ -93,20 +115,21 @@ class TemporalGRU(nn.Module):
         Returns:
             (B, N, D_hidden) temporal encoding per node
         """
-        # Pack padded sequence
-        lengths = (~mask).sum(dim=1).cpu()  # (B,)
-        # Since nodes within a sequence have the same temporal aspect,
-        # we process per-batch-item separately (bottleneck but simple)
-        B, N, D = x.shape
-        outputs = torch.zeros(B, N, self.proj.out_features, device=x.device)
-        for b in range(B):
-            valid_len = int(lengths[b].item())
-            if valid_len == 0:
-                continue
-            packed = x[b, :valid_len].unsqueeze(0)  # (1, N_valid, D)
-            gru_out, _ = self.gru(packed)  # (1, N_valid, 2*H)
-            outputs[b, :valid_len] = self.proj(gru_out[0])
-        return outputs
+        lengths = (~mask).sum(dim=1).cpu().clamp_min(1)  # (B,) 防止长度为 0
+
+        # 完全向量化的 GRU 处理，消除 for 循环瓶颈
+        packed = torch.nn.utils.rnn.pack_padded_sequence(
+            x, lengths, batch_first=True, enforce_sorted=False
+        )
+        gru_out, _ = self.gru(packed)
+        unpacked, _ = torch.nn.utils.rnn.pad_packed_sequence(
+            gru_out, batch_first=True, total_length=x.shape[1]
+        )
+        
+        # 投影并应用 mask 清理填充区域的输出
+        outputs = self.proj(unpacked)
+        valid_mask = (~mask).unsqueeze(-1).float()
+        return outputs * valid_mask
 
 
 class STGNNPredictor(nn.Module):
@@ -178,7 +201,7 @@ class STGNNPredictor(nn.Module):
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(fusion_hidden_dim, output_dim),
-            nn.Softplus(),
+            nn.ReLU(),
         )
 
     def forward(
@@ -204,6 +227,8 @@ class STGNNPredictor(nn.Module):
         # 兼容旧调用：优先使用 Dataset 提供的真实物理坐标/时间。
         coords = graph_coords_km if graph_coords_km is not None else seq_x[:, :, 2:4]
         event_times = graph_time_days if graph_time_days is not None else seq_x[:, :, 0]
+        # 提取事件震级用于震级感知边权重（seq_x 最后一维为 mag）
+        event_mags = seq_x[:, :, -1]  # (B, N)，未标准化的原始震级
 
         # Node projection
         h = self.node_proj(seq_x)  # (B, N, node_hidden_dim)
@@ -211,7 +236,7 @@ class STGNNPredictor(nn.Module):
         # GNN blocks
         for block in self.gnn_blocks:
             h_res = h
-            h = block["spatial"](h, coords, event_times, seq_padding_mask)
+            h = block["spatial"](h, coords, event_times, seq_padding_mask, event_mags=event_mags)
             h = block["norm1"](h + h_res)
             h = block["dropout"](h)
 

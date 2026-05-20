@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "skills": {
+    "self-improving-agent": {
+      "name": "self-improving-agent",
+      "zip_url": "https://lightmake.site/api/v1/download?slug=self-improving-agent",
+      "source": "community",
+      "version": "1.0.11",
+      "installedAt": "2026-05-19T10:00:21Z"
+    },
+    "skill-vetter": {
+      "name": "Skill Vetter",
+      "zip_url": "https://lightmake.site/api/v1/download?slug=skill-vetter",
+      "source": "community",
+      "version": "1.0.0",
+      "installedAt": "2026-05-19T10:00:53Z"
+    },
+    "multi-search-engine": {
+      "name": "Multi Search Engine",
+      "zip_url": "https://lightmake.site/api/v1/download?slug=multi-search-engine",
+      "source": "community",
+      "version": "2.1.3",
+      "installedAt": "2026-05-19T10:01:30Z"
+    },
+    "humanizer": {
+      "name": "Humanizer",
+      "zip_url": "https://lightmake.site/api/v1/download?slug=humanizer",
+      "source": "community",
+      "version": "1.0.0",
+      "installedAt": "2026-05-19T10:01:48Z"
+    },
+    "agent-memory": {
+      "name": "Agent Memory",
+      "zip_url": "https://lightmake.site/api/v1/download?slug=agent-memory",
+      "source": "community",
+      "version": "1.0.0",
+      "installedAt": "2026-05-19T10:02:23Z"
+    },
+    "find-skills": {
+      "name": "Find Skills",
+      "zip_url": "https://lightmake.site/api/v1/download?slug=find-skills",
+      "source": "community",
+      "version": "0.1.0",
+      "installedAt": "2026-05-19T10:02:49Z"
+    }
+  }
+}

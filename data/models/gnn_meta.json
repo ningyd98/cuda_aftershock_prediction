@@ -1,7 +1,7 @@
 {
   "model_class": "STGNNPredictor",
-  "event_feature_dim": 7,
-  "global_feature_dim": 106,
+  "event_feature_dim": 12,
+  "global_feature_dim": 116,
   "global_feature_cols": [
     "mainshock_mag",
     "mainshock_depth",
@@ -50,6 +50,11 @@
     "etas_nll",
     "etas_n",
     "etas_valid",
+    "etas_branching_ratio",
+    "etas_expected_count",
+    "etas_triggered_fraction",
+    "etas_triggered_mag_sum",
+    "etas_bg_rate_total",
     "plate_type_SUB",
     "plate_type_OTF",
     "plate_type_OSR",
@@ -98,6 +103,11 @@
     "etas_c",
     "etas_p",
     "etas_nll",
+    "etas_branching_ratio",
+    "etas_expected_count",
+    "etas_triggered_fraction",
+    "etas_triggered_mag_sum",
+    "etas_bg_rate_total",
     "strike1",
     "dip1",
     "rake1",
@@ -117,13 +127,13 @@
   "node_hidden_dim": 64,
   "num_gnn_layers": 3,
   "gnn_radius_km": 100.0,
-  "trained_at": "2026-05-18T07:50:00.277387+00:00",
+  "trained_at": "2026-05-19T13:45:51.637920+00:00",
   "best_val_metrics": {
-    "mag_rmse": 0.4822652916905661,
-    "mag_mae": 0.3889485689624505,
-    "time_rmse": 9.02557577921557,
-    "time_mae": 6.746100853911344,
-    "time_asymmetric_mae": 7.835937073093233,
-    "time_asymmetric_rmse": 9.241938188392552
+    "mag_rmse": 0.46967271890294016,
+    "mag_mae": 0.3712512935618798,
+    "time_rmse": 9.077743603754994,
+    "time_mae": 6.788941518334899,
+    "time_asymmetric_mae": 7.869141620016732,
+    "time_asymmetric_rmse": 9.293924373391226
   }
 }
