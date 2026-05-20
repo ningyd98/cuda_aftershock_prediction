@@ -1,0 +1,432 @@
+{
+  "analyzed_at": "2026-05-20T12:23:42.650351+00:00",
+  "total_sequences": 20,
+  "model_info": {
+    "model_class": "Seq2SeqAftershockPredictor",
+    "event_feature_dim": 12,
+    "global_feature_dim": 116,
+    "global_feature_cols": [
+      "mainshock_mag",
+      "mainshock_depth",
+      "early_aftershock_count",
+      "early_max_mag",
+      "early_mean_mag",
+      "early_energy_sum",
+      "advanced_early_event_count",
+      "bath_deficit",
+      "bath_early_max_mag",
+      "bath_valid",
+      "gr_b_value",
+      "gr_a_value",
+      "gr_mc",
+      "gr_n",
+      "gr_valid",
+      "productivity_index",
+      "omori_p",
+      "omori_c",
+      "omori_k",
+      "omori_nll",
+      "omori_n",
+      "omori_p_boundary_hit",
+      "omori_valid",
+      "anisotropy_major_axis_km",
+      "anisotropy_minor_axis_km",
+      "anisotropy_axis_ratio",
+      "anisotropy_azimuth_deg",
+      "anisotropy_n",
+      "anisotropy_valid",
+      "count_1h",
+      "energy_1h",
+      "count_6h",
+      "energy_6h",
+      "count_12h",
+      "energy_12h",
+      "count_24h",
+      "energy_24h",
+      "count_72h",
+      "energy_72h",
+      "etas_mu",
+      "etas_K0",
+      "etas_alpha",
+      "etas_c",
+      "etas_p",
+      "etas_nll",
+      "etas_n",
+      "etas_valid",
+      "etas_branching_ratio",
+      "etas_expected_count",
+      "etas_triggered_fraction",
+      "etas_triggered_mag_sum",
+      "etas_bg_rate_total",
+      "plate_type_SUB",
+      "plate_type_OTF",
+      "plate_type_OSR",
+      "plate_type_UNK",
+      "plate_boundary_distance_km",
+      "strike1",
+      "dip1",
+      "rake1",
+      "strike2",
+      "dip2",
+      "rake2",
+      "fault_type_Thrust",
+      "fault_type_Normal",
+      "fault_type_Strike_Slip",
+      "fault_type_Unknown",
+      "fault_type_NF",
+      "fault_type_SS",
+      "fault_type_TF",
+      "fault_type_UNK",
+      "plunge_P",
+      "trend_P",
+      "plunge_T",
+      "trend_T",
+      "f_clvd",
+      "gcmt_time_diff_seconds",
+      "gcmt_distance_km",
+      "focal_mechanism_valid"
+    ],
+    "global_indicator_cols": [
+      "bath_early_max_mag",
+      "gr_b_value",
+      "gr_a_value",
+      "gr_mc",
+      "productivity_index",
+      "omori_p",
+      "omori_c",
+      "omori_k",
+      "omori_nll",
+      "anisotropy_major_axis_km",
+      "anisotropy_minor_axis_km",
+      "anisotropy_axis_ratio",
+      "anisotropy_azimuth_deg",
+      "etas_mu",
+      "etas_K0",
+      "etas_alpha",
+      "etas_c",
+      "etas_p",
+      "etas_nll",
+      "etas_branching_ratio",
+      "etas_expected_count",
+      "etas_triggered_fraction",
+      "etas_triggered_mag_sum",
+      "etas_bg_rate_total",
+      "strike1",
+      "dip1",
+      "rake1",
+      "strike2",
+      "dip2",
+      "rake2",
+      "plunge_P",
+      "trend_P",
+      "plunge_T",
+      "trend_T",
+      "f_clvd",
+      "gcmt_time_diff_seconds",
+      "gcmt_distance_km"
+    ],
+    "preprocessor_path": "dl_preprocessors.joblib",
+    "time_target_transform": "log1p",
+    "d_model": 128,
+    "nhead": 4,
+    "num_layers": 3,
+    "trained_at": "2026-05-20T12:12:49.018401+00:00",
+    "best_val_metrics": {
+      "mag_rmse": 0.47173520459932045,
+      "mag_mae": 0.37383469095769917,
+      "mag_medae": 0.30859375,
+      "mag_weighted_rmse": 0.595098826786412,
+      "time_rmse": 9.0520819408347,
+      "time_mae": 6.7804770069085,
+      "time_medae": 4.342360496520996,
+      "time_log_rmse": 0.4050646223499373,
+      "time_hit_rate": 0.09948542024013722,
+      "time_asymmetric_mae": 7.846399317922049,
+      "time_asymmetric_rmse": 9.268851237720078,
+      "mag_energy_ratio_median": 2.9032913822564486,
+      "mag_energy_ratio_mean": 7.451480020256117
+    }
+  },
+  "results": [
+    {
+      "mainshock_id": "20010126031640",
+      "mainshock_mag": 7.7,
+      "mainshock_time": "2001-01-26 03:16:40+00:00",
+      "mainshock_depth": 16.0,
+      "early_event_count": 33,
+      "predicted_max_mag": 5.65,
+      "predicted_time_days": 2.557,
+      "model_architecture": {
+        "d_model": 128,
+        "nhead": 4,
+        "num_layers": 3
+      }
+    },
+    {
+      "mainshock_id": "20021103221241",
+      "mainshock_mag": 7.9,
+      "mainshock_time": "2002-11-03 22:12:41+00:00",
+      "mainshock_depth": 4.2,
+      "early_event_count": 223,
+      "predicted_max_mag": 5.6,
+      "predicted_time_days": 2.733,
+      "model_architecture": {
+        "d_model": 128,
+        "nhead": 4,
+        "num_layers": 3
+      }
+    },
+    {
+      "mainshock_id": "20031227160059",
+      "mainshock_mag": 7.3,
+      "mainshock_time": "2003-12-27 16:00:59+00:00",
+      "mainshock_depth": 10.0,
+      "early_event_count": 76,
+      "predicted_max_mag": 5.77,
+      "predicted_time_days": 2.281,
+      "model_architecture": {
+        "d_model": 128,
+        "nhead": 4,
+        "num_layers": 3
+      }
+    },
+    {
+      "mainshock_id": "20041226005853",
+      "mainshock_mag": 9.1,
+      "mainshock_time": "2004-12-26 00:58:53+00:00",
+      "mainshock_depth": 30.0,
+      "early_event_count": 14,
+      "predicted_max_mag": 5.67,
+      "predicted_time_days": 2.811,
+      "model_architecture": {
+        "d_model": 128,
+        "nhead": 4,
+        "num_layers": 3
+      }
+    },
+    {
+      "mainshock_id": "20070815234057",
+      "mainshock_mag": 8.0,
+      "mainshock_time": "2007-08-15 23:40:57+00:00",
+      "mainshock_depth": 39.0,
+      "early_event_count": 65,
+      "predicted_max_mag": 5.85,
+      "predicted_time_days": 2.177,
+      "model_architecture": {
+        "d_model": 128,
+        "nhead": 4,
+        "num_layers": 3
+      }
+    },
+    {
+      "mainshock_id": "20080512062804",
+      "mainshock_mag": 8.0,
+      "mainshock_time": "2008-05-12 06:28:04+00:00",
+      "mainshock_depth": 14.0,
+      "early_event_count": 188,
+      "predicted_max_mag": 5.73,
+      "predicted_time_days": 2.533,
+      "model_architecture": {
+        "d_model": 128,
+        "nhead": 4,
+        "num_layers": 3
+      }
+    },
+    {
+      "mainshock_id": "20100227080123",
+      "mainshock_mag": 7.4,
+      "mainshock_time": "2010-02-27 08:01:23+00:00",
+      "mainshock_depth": 35.0,
+      "early_event_count": 20,
+      "predicted_max_mag": 5.63,
+      "predicted_time_days": 2.751,
+      "model_architecture": {
+        "d_model": 128,
+        "nhead": 4,
+        "num_layers": 3
+      }
+    },
+    {
+      "mainshock_id": "20110311054624",
+      "mainshock_mag": 9.1,
+      "mainshock_time": "2011-03-11 05:46:24+00:00",
+      "mainshock_depth": 29.0,
+      "early_event_count": 262,
+      "predicted_max_mag": 5.94,
+      "predicted_time_days": 2.076,
+      "model_architecture": {
+        "d_model": 128,
+        "nhead": 4,
+        "num_layers": 3
+      }
+    },
+    {
+      "mainshock_id": "20120411083836",
+      "mainshock_mag": 8.6,
+      "mainshock_time": "2012-04-11 08:38:36+00:00",
+      "mainshock_depth": 20.0,
+      "early_event_count": 47,
+      "predicted_max_mag": 5.79,
+      "predicted_time_days": 2.237,
+      "model_architecture": {
+        "d_model": 128,
+        "nhead": 4,
+        "num_layers": 3
+      }
+    },
+    {
+      "mainshock_id": "20130420000246",
+      "mainshock_mag": 7.0,
+      "mainshock_time": "2013-04-20 00:02:46+00:00",
+      "mainshock_depth": 13.0,
+      "early_event_count": 100,
+      "predicted_max_mag": 5.45,
+      "predicted_time_days": 3.099,
+      "model_architecture": {
+        "d_model": 128,
+        "nhead": 4,
+        "num_layers": 3
+      }
+    },
+    {
+      "mainshock_id": "20150425061125",
+      "mainshock_mag": 7.8,
+      "mainshock_time": "2015-04-25 06:11:25+00:00",
+      "mainshock_depth": 8.2,
+      "early_event_count": 53,
+      "predicted_max_mag": 5.79,
+      "predicted_time_days": 2.311,
+      "model_architecture": {
+        "d_model": 128,
+        "nhead": 4,
+        "num_layers": 3
+      }
+    },
+    {
+      "mainshock_id": "20190706031953",
+      "mainshock_mag": 7.1,
+      "mainshock_time": "2019-07-06 03:19:53+00:00",
+      "mainshock_depth": 8.0,
+      "early_event_count": 742,
+      "predicted_max_mag": 5.35,
+      "predicted_time_days": 3.414,
+      "model_architecture": {
+        "d_model": 128,
+        "nhead": 4,
+        "num_layers": 3
+      }
+    },
+    {
+      "mainshock_id": "20201030115127",
+      "mainshock_mag": 7.0,
+      "mainshock_time": "2020-10-30 11:51:27+00:00",
+      "mainshock_depth": 21.0,
+      "early_event_count": 18,
+      "predicted_max_mag": 5.08,
+      "predicted_time_days": 4.15,
+      "model_architecture": {
+        "d_model": 128,
+        "nhead": 4,
+        "num_layers": 3
+      }
+    },
+    {
+      "mainshock_id": "20210521134834",
+      "mainshock_mag": 6.4,
+      "mainshock_time": "2021-05-21 13:48:34+00:00",
+      "mainshock_depth": 8.0,
+      "early_event_count": 31,
+      "predicted_max_mag": 5.17,
+      "predicted_time_days": 3.908,
+      "model_architecture": {
+        "d_model": 128,
+        "nhead": 4,
+        "num_layers": 3
+      }
+    },
+    {
+      "mainshock_id": "20210521180411",
+      "mainshock_mag": 7.4,
+      "mainshock_time": "2021-05-21 18:04:11+00:00",
+      "mainshock_depth": 17.0,
+      "early_event_count": 42,
+      "predicted_max_mag": 5.58,
+      "predicted_time_days": 2.703,
+      "model_architecture": {
+        "d_model": 128,
+        "nhead": 4,
+        "num_layers": 3
+      }
+    },
+    {
+      "mainshock_id": "20210814122908",
+      "mainshock_mag": 7.2,
+      "mainshock_time": "2021-08-14 12:29:08+00:00",
+      "mainshock_depth": 10.0,
+      "early_event_count": 30,
+      "predicted_max_mag": 5.39,
+      "predicted_time_days": 3.196,
+      "model_architecture": {
+        "d_model": 128,
+        "nhead": 4,
+        "num_layers": 3
+      }
+    },
+    {
+      "mainshock_id": "20220905045218",
+      "mainshock_mag": 6.8,
+      "mainshock_time": "2022-09-05 04:52:18+00:00",
+      "mainshock_depth": 16.0,
+      "early_event_count": 15,
+      "predicted_max_mag": 5.05,
+      "predicted_time_days": 4.115,
+      "model_architecture": {
+        "d_model": 128,
+        "nhead": 4,
+        "num_layers": 3
+      }
+    },
+    {
+      "mainshock_id": "20230206011734",
+      "mainshock_mag": 7.8,
+      "mainshock_time": "2023-02-06 01:17:34+00:00",
+      "mainshock_depth": 10.0,
+      "early_event_count": 169,
+      "predicted_max_mag": 5.84,
+      "predicted_time_days": 2.299,
+      "model_architecture": {
+        "d_model": 128,
+        "nhead": 4,
+        "num_layers": 3
+      }
+    },
+    {
+      "mainshock_id": "20231202143704",
+      "mainshock_mag": 7.6,
+      "mainshock_time": "2023-12-02 14:37:04+00:00",
+      "mainshock_depth": 40.0,
+      "early_event_count": 481,
+      "predicted_max_mag": 5.87,
+      "predicted_time_days": 2.404,
+      "model_architecture": {
+        "d_model": 128,
+        "nhead": 4,
+        "num_layers": 3
+      }
+    },
+    {
+      "mainshock_id": "20240122180905",
+      "mainshock_mag": 7.1,
+      "mainshock_time": "2024-01-22 18:09:05+00:00",
+      "mainshock_depth": 22.0,
+      "early_event_count": 143,
+      "predicted_max_mag": 5.5,
+      "predicted_time_days": 3.0,
+      "model_architecture": {
+        "d_model": 128,
+        "nhead": 4,
+        "num_layers": 3
+      }
+    }
+  ]
+}

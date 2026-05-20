@@ -52,6 +52,8 @@ FEATURE_PREFIXES = (
     "log_depth",
     "depth_mag_",
     "productivity_per_",
+    "decay_count_",
+    "decay_energy_",
 )
 EXPLICIT_FEATURES = {
     "mainshock_mag",
@@ -167,6 +169,40 @@ def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
     # 生产力指数与早期事件数交互
     if "productivity_index" in df.columns and "early_aftershock_count" in df.columns:
         df["productivity_per_event"] = df["productivity_index"] / df["early_aftershock_count"].clip(lower=1)
+
+    # ── 子窗口计数与能量（非累积）──
+    # 从累积 count_{h}h / energy_{h}h 反推区间内的事件数和能量
+    if "count_12h" in df.columns and "count_24h" in df.columns and "count_72h" in df.columns:
+        c12 = df["count_12h"].fillna(0).astype(int)
+        c24 = df["count_24h"].fillna(0).astype(int)
+        c72 = df["count_72h"].fillna(0).astype(int)
+        df["count_0_12h"] = c12
+        df["count_12_24h"] = (c24 - c12).clip(lower=0)
+        df["count_24_72h"] = (c72 - c24).clip(lower=0)
+    if "energy_12h" in df.columns and "energy_24h" in df.columns and "energy_72h" in df.columns:
+        e12 = df["energy_12h"].fillna(0.0)
+        e24 = df["energy_24h"].fillna(0.0)
+        e72 = df["energy_72h"].fillna(0.0)
+        df["energy_0_12h"] = e12
+        df["energy_12_24h"] = (e24 - e12).clip(lower=0.0)
+        df["energy_24_72h"] = (e72 - e24).clip(lower=0.0)
+
+    # ── 衰减梯度（早期/晚期比值 & 斜率）──
+    if "count_12h" in df.columns and "count_72h" in df.columns:
+        c12 = df["count_12h"].fillna(0).astype(int)
+        c24 = df["count_24h"].fillna(0).astype(int)
+        c72 = df["count_72h"].fillna(0).astype(int)
+        late_c = (c72 - c24).clip(lower=0)
+        total_c = c72.clip(lower=1)
+        df["decay_count_ratio_early_late"] = c12 / late_c.clip(lower=1)
+        df["decay_count_gradient"] = (c12 - (c72 - c24).clip(lower=0)) / total_c
+    if "energy_12h" in df.columns and "energy_72h" in df.columns:
+        e12 = df["energy_12h"].fillna(0.0)
+        e24 = df["energy_24h"].fillna(0.0)
+        e72 = df["energy_72h"].fillna(0.0)
+        late_e = (e72 - e24).clip(lower=0.0)
+        df["decay_energy_ratio_early_late"] = e12 / late_e.clip(lower=1e-10)
+        df["decay_energy_gradient"] = (e12 - (e72 - e24).clip(lower=0.0)) / e72.clip(lower=1e-10)
 
     return df
 

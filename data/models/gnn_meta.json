@@ -127,13 +127,20 @@
   "node_hidden_dim": 64,
   "num_gnn_layers": 3,
   "gnn_radius_km": 100.0,
-  "trained_at": "2026-05-19T13:45:51.637920+00:00",
+  "trained_at": "2026-05-20T12:12:03.435129+00:00",
   "best_val_metrics": {
-    "mag_rmse": 0.46967271890294016,
-    "mag_mae": 0.3712512935618798,
-    "time_rmse": 9.077743603754994,
-    "time_mae": 6.788941518334899,
-    "time_asymmetric_mae": 7.869141620016732,
-    "time_asymmetric_rmse": 9.293924373391226
+    "mag_rmse": 0.4748310627193245,
+    "mag_mae": 0.37923242052055345,
+    "mag_medae": 0.31093740463256836,
+    "mag_weighted_rmse": 0.5893311078858289,
+    "time_rmse": 9.326821217247023,
+    "time_mae": 6.968486956849464,
+    "time_medae": 4.515980124473572,
+    "time_log_rmse": 0.42576036443530896,
+    "time_hit_rate": 0.09090909090909091,
+    "time_asymmetric_mae": 7.979743490126591,
+    "time_asymmetric_rmse": 9.540030056504834,
+    "mag_energy_ratio_median": 2.9268880193137803,
+    "mag_energy_ratio_mean": 7.666782529874183
   }
 }

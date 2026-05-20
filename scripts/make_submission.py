@@ -282,8 +282,43 @@ def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
         df["log_depth"] = np.log1p(df["mainshock_depth"].clip(lower=0))
         df["depth_mag_ratio"] = df["mainshock_depth"] / df["mainshock_mag"].clip(lower=1.0)
 
+    # 生产力指数与早期事件数交互
     if "productivity_index" in df.columns and "early_aftershock_count" in df.columns:
         df["productivity_per_event"] = df["productivity_index"] / df["early_aftershock_count"].clip(lower=1)
+
+    # ── 子窗口计数与能量（非累积）──
+    # 从累积 count_{h}h / energy_{h}h 反推区间内的事件数和能量
+    if "count_12h" in df.columns and "count_24h" in df.columns and "count_72h" in df.columns:
+        c12 = df["count_12h"].fillna(0).astype(int)
+        c24 = df["count_24h"].fillna(0).astype(int)
+        c72 = df["count_72h"].fillna(0).astype(int)
+        df["count_0_12h"] = c12
+        df["count_12_24h"] = (c24 - c12).clip(lower=0)
+        df["count_24_72h"] = (c72 - c24).clip(lower=0)
+    if "energy_12h" in df.columns and "energy_24h" in df.columns and "energy_72h" in df.columns:
+        e12 = df["energy_12h"].fillna(0.0)
+        e24 = df["energy_24h"].fillna(0.0)
+        e72 = df["energy_72h"].fillna(0.0)
+        df["energy_0_12h"] = e12
+        df["energy_12_24h"] = (e24 - e12).clip(lower=0.0)
+        df["energy_24_72h"] = (e72 - e24).clip(lower=0.0)
+
+    # ── 衰减梯度（早期/晚期比值 & 斜率）──
+    if "count_12h" in df.columns and "count_72h" in df.columns:
+        c12 = df["count_12h"].fillna(0).astype(int)
+        c24 = df["count_24h"].fillna(0).astype(int)
+        c72 = df["count_72h"].fillna(0).astype(int)
+        late_c = (c72 - c24).clip(lower=0)
+        total_c = c72.clip(lower=1)
+        df["decay_count_ratio_early_late"] = c12 / late_c.clip(lower=1)
+        df["decay_count_gradient"] = (c12 - (c72 - c24).clip(lower=0)) / total_c
+    if "energy_12h" in df.columns and "energy_72h" in df.columns:
+        e12 = df["energy_12h"].fillna(0.0)
+        e24 = df["energy_24h"].fillna(0.0)
+        e72 = df["energy_72h"].fillna(0.0)
+        late_e = (e72 - e24).clip(lower=0.0)
+        df["decay_energy_ratio_early_late"] = e12 / late_e.clip(lower=1e-10)
+        df["decay_energy_gradient"] = (e12 - (e72 - e24).clip(lower=0.0)) / e72.clip(lower=1e-10)
 
     return df
 
@@ -309,6 +344,7 @@ def check_feature_consistency(
         "mainshock_lat", "mainshock_lon",
         "target_max_mag", "target_time_to_max_days",
         "nearest_plate_boundary_type",
+        "fault_type",  # 原始断层类型字符串列，仅用于 one-hot 展开
     })
 
     if not missing_from_inference and not extra_in_inference:
@@ -467,7 +503,11 @@ def predict_with_dl(
             nhead=dl_meta.get("nhead", 4),
             num_layers=dl_meta.get("num_layers", 3),
         )
-        model.load_state_dict(torch.load(dl_model_path, map_location=_dev, weights_only=True))
+        state_dict = torch.load(dl_model_path, map_location=_dev, weights_only=True)
+        # 剥离 torch.compile 产生的 _orig_mod. 前缀
+        if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
+            state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+        model.load_state_dict(state_dict)
         model.to(_dev)
         model.eval()
 
@@ -538,7 +578,11 @@ def predict_with_gnn(
             num_gnn_layers=gnn_meta.get("num_gnn_layers", 3),
             gnn_radius_km=gnn_meta.get("gnn_radius_km", 100.0),
         )
-        model.load_state_dict(torch.load(gnn_model_path, map_location=_dev, weights_only=True))
+        state_dict = torch.load(gnn_model_path, map_location=_dev, weights_only=True)
+        # 剥离 torch.compile 产生的 _orig_mod. 前缀
+        if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
+            state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+        model.load_state_dict(state_dict)
         model.to(_dev)
         model.eval()
 

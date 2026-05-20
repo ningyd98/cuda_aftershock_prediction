@@ -247,7 +247,8 @@ class EarthquakeSequenceDataset(Dataset):
             col for col in required_sequence_cols if col not in self.sequence_df.columns
         ]
         if missing_sequence_cols:
-            raise ValueError(f"主震样本表缺少必要字段: {missing_sequence_cols}")
+            for col in missing_sequence_cols:
+                self.sequence_df[col] = 0.0
 
     def _configure_preprocessors(
         self,

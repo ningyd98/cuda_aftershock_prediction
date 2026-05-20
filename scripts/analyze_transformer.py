@@ -96,9 +96,10 @@ def load_model_and_meta(model_dir: Path, device_str: str = "auto"):
         nhead=meta.get("nhead", 4),
         num_layers=meta.get("num_layers", 3),
     )
-    model.load_state_dict(
-        torch.load(model_path, map_location=_dev, weights_only=True)
-    )
+    state_dict = torch.load(model_path, map_location=_dev, weights_only=True)
+    # Remove _orig_mod. prefix if model was saved with torch.compile()
+    state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+    model.load_state_dict(state_dict)
     model.to(_dev)
     model.eval()
 

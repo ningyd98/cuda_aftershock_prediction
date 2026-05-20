@@ -109,8 +109,16 @@ def haversine_km(lat1, lon1, lat2, lon2):
     return R * 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
 
 
-def extract_true_labels(full_catalog_path: Path, test_dir: Path) -> pd.DataFrame:
-    """从 USGS 完整目录提取 20 条测试序列的真实标签。"""
+def extract_true_labels(
+    full_catalog_path: Path, test_dir: Path, obs_days: float = 3.0
+) -> pd.DataFrame:
+    """从 USGS 完整目录提取 20 条测试序列的真实标签。
+
+    与训练时 data_loader.py 保持相同约定：
+    - 主震 = 序列 CSV 中震级最大的事件（不是 iloc[0]）
+    - true_time = 从"观测窗口结束时刻"到"最大余震时刻"的天数
+    - 主震自身（或目录中与主震时间差 < 5 秒的重复条目）被显式排除
+    """
     print("=" * 60)
     print("提取测试序列真实标签 …")
     full = pd.read_csv(full_catalog_path)
@@ -119,28 +127,54 @@ def extract_true_labels(full_catalog_path: Path, test_dir: Path) -> pd.DataFrame
     for csv_file in sorted(test_dir.glob("*_eq.csv")):
         seq = pd.read_csv(csv_file)
         sid = csv_file.stem
-        main_lat = float(seq.iloc[0]["Lat"])
-        main_lon = float(seq.iloc[0]["Lon"])
-        main_time = pd.to_datetime(str(seq.iloc[0]["Date"]) + " " + str(seq.iloc[0]["Time"]), utc=True)
-        main_mag = float(seq.iloc[0]["Mag"])
+
+        # ── 正确识别主震：取序列 CSV 中 mag 最大的事件 ──
+        main_idx = seq["Mag"].idxmax()
+        main_row = seq.loc[main_idx]
+        main_lat = float(main_row["Lat"])
+        main_lon = float(main_row["Lon"])
+        main_time = pd.to_datetime(
+            str(main_row["Date"]) + " " + str(main_row["Time"]), utc=True
+        )
+        main_mag = float(main_row["Mag"])
+
+        # 观测窗口结束时刻 (与训练一致)
+        obs_end = main_time + pd.Timedelta(days=obs_days)
         time_end = main_time + pd.Timedelta(days=30)
-        mask = (full["time"] > main_time) & (full["time"] <= time_end)
-        candidates = full[mask].copy()
+
+        # 排除主震自身：目录中时间在 main_time 前后 5 秒内的条目
+        main_time_exclusion = (full["time"] >= main_time - pd.Timedelta(seconds=5)) & \
+                              (full["time"] <= main_time + pd.Timedelta(seconds=5))
+        full_no_mainshock = full[~main_time_exclusion]
+
+        # ── 与训练一致：只在观测窗口之后 (3-30 天) 寻找目标余震 ──
+        mask = (full_no_mainshock["time"] > obs_end) & (full_no_mainshock["time"] <= time_end)
+        candidates = full_no_mainshock[mask].copy()
         if len(candidates) == 0:
             true_mag, true_time = 0.0, 0.0
         else:
-            dists = haversine_km(main_lat, main_lon,
-                                 candidates["latitude"].values.astype(float),
-                                 candidates["longitude"].values.astype(float))
+            dists = haversine_km(
+                main_lat, main_lon,
+                candidates["latitude"].values.astype(float),
+                candidates["longitude"].values.astype(float),
+            )
             nearby = candidates[dists <= 100.0]
             if len(nearby) == 0:
                 true_mag, true_time = 0.0, 0.0
             else:
                 idx_max = nearby["mag"].idxmax()
                 true_mag = float(nearby.loc[idx_max, "mag"])
-                true_time = (nearby.loc[idx_max, "time"] - main_time).total_seconds() / 86400.0
-        records.append({"mainshock_id": sid, "mainshock_mag": main_mag,
-                        "true_max_mag": true_mag, "true_time_to_max_days": true_time})
+                # ── 时间约定与训练一致：从观测窗口结束算起 ──
+                true_time = (
+                    nearby.loc[idx_max, "time"] - obs_end
+                ).total_seconds() / 86400.0
+
+        records.append({
+            "mainshock_id": sid,
+            "mainshock_mag": main_mag,
+            "true_max_mag": true_mag,
+            "true_time_to_max_days": true_time,
+        })
     result = pd.DataFrame(records)
     n_with = (result["true_max_mag"] > 0).sum()
     print(f"  {len(result)} 条测试序列, {n_with} 条有余震")

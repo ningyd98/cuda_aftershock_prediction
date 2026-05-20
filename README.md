@@ -423,6 +423,32 @@ python scripts/analyze_transformer.py \
 - 各早期余震事件对预测的贡献度排名
 - 注意力权重矩阵 (可选 `--extract-attention`)
 
+### 批量 OOF 推理（全部模型 + 一致性分析）
+
+一键对赛事官方的 20 条测试序列运行四个模型（baseline / XGBoost / Transformer / ST-GNN）
+的独立预测与集成融合，输出包含单模型预测、融合结果和模型间一致性统计：
+
+```bash
+# 批量推理所有测试序列
+python scripts/batch_oof_inference.py \
+    --input-dir data/test_sequences \
+    --model-dir data/models \
+    --output-dir reports/batch_oof_inference
+
+# 单条推理（等价于增强版 make_submission，含各模型分解）
+python scripts/batch_oof_inference.py \
+    --input data/test_sequences/20230206011734_eq.csv \
+    --model-dir data/models \
+    --output-dir reports/batch_oof_inference
+```
+
+产物：
+| 文件 | 说明 |
+|:---|:---|
+| `batch_oof_predictions.csv` | 精简版（融合结果 + 主震元信息） |
+| `batch_oof_predictions_full.csv` | 完整版（含 baseline/xgboost/dl/gnn 各模型独立预测 + 一致性 std/range） |
+| `batch_oof_summary.json` | 运行汇总（模型可用性、平均预测、模型间一致性） |
+
 ## 关键设计
 
 | 维度 | 方案 |

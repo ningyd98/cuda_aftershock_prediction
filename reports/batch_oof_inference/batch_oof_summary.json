@@ -1,0 +1,39 @@
+{
+  "run_at": "2026-05-20T13:43:18.341702+00:00",
+  "total_sequences": 20,
+  "success_count": 20,
+  "error_count": 0,
+  "total_elapsed_seconds": 8.8,
+  "average_seconds_per_sequence": 0.44,
+  "models_detected": [
+    "baseline",
+    "xgboost",
+    "dl",
+    "gnn"
+  ],
+  "ensemble_weights": {
+    "mag": {
+      "baseline": 0.0,
+      "xgboost": 1.0,
+      "dl": 0.0,
+      "gnn": 0.0
+    },
+    "time": {
+      "baseline": 0.26,
+      "xgboost": 0.74,
+      "dl": 0.0,
+      "gnn": 0.0
+    }
+  },
+  "predictions_summary": {
+    "avg_predicted_mag": 5.4438,
+    "std_predicted_mag": 0.6024,
+    "avg_predicted_time_days": 7.0439,
+    "std_predicted_time_days": 4.2873
+  },
+  "model_agreement": {
+    "avg_mag_std_across_models": 0.1934,
+    "avg_time_std_across_models": 2.5292
+  },
+  "errors": []
+}

@@ -97,5 +97,15 @@
   "b_value_times_mag",
   "log_depth",
   "depth_mag_ratio",
-  "productivity_per_event"
+  "productivity_per_event",
+  "count_0_12h",
+  "count_12_24h",
+  "count_24_72h",
+  "energy_0_12h",
+  "energy_12_24h",
+  "energy_24_72h",
+  "decay_count_ratio_early_late",
+  "decay_count_gradient",
+  "decay_energy_ratio_early_late",
+  "decay_energy_gradient"
 ]
