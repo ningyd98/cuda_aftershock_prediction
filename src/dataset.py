@@ -181,17 +181,57 @@ class EarthquakeSequenceDataset(Dataset):
         global_x = self.global_x_matrix[idx]
         y = self._build_target_array(row)
 
+        # 数据增强（仅在训练模式）
+        if getattr(self, "augment", False) and len(seq_x) >= 3:
+            seq_x, graph_coords_km = self._apply_augmentation(seq_x, graph_coords_km, raw_seq_x)
+
+        # 主震走向（用于 GNN 各向异性边）
+        strike_deg = float(row.get("strike1", -1))
+        mainshock_strike_rad = np.radians(strike_deg) if strike_deg >= 0 else -1.0
+
         return {
             "seq_x": torch.tensor(seq_x, dtype=torch.float32),
             "graph_time_days": torch.tensor(graph_time_days, dtype=torch.float32),
             "graph_coords_km": torch.tensor(graph_coords_km, dtype=torch.float32),
             "global_x": torch.tensor(global_x, dtype=torch.float32),
             "y": torch.tensor(y, dtype=torch.float32),
+            "mainshock_strike_rad": torch.tensor(mainshock_strike_rad, dtype=torch.float32),
             "metadata": {
                 "mainshock_id": row["mainshock_id"],
                 "mainshock_time": str(row["mainshock_time"]),
             },
         }
+
+    @staticmethod
+    def _apply_augmentation(
+        seq_x: np.ndarray,
+        graph_coords_km: np.ndarray,
+        raw_seq_x: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """数据增强：随机丢弃微小余震 + 坐标高斯噪声（模拟台网漏测与定位误差）。"""
+        n = len(seq_x)
+        aug_seq = seq_x.copy()
+        aug_coords = graph_coords_km.copy()
+        mag_col = 6  # _IDX_MAG
+        rng = np.random.default_rng()
+
+        # 1) 随机丢弃 10% 的早期微小余震（mag < max_mag - 1.5），模拟漏测
+        seq_mags = raw_seq_x[:, mag_col] if n else np.array([])
+        if len(seq_mags):
+            max_mag = float(seq_mags.max())
+            small_mask = seq_mags < (max_mag - 1.5)
+            drop = small_mask & (rng.random(len(seq_mags)) < 0.10)
+            if drop.any():
+                aug_seq[drop] = 0.0
+                aug_coords[drop] = 0.0
+
+        # 2) 坐标添加高斯噪声 σ=2km（模拟定位误差）
+        if n and not np.all(aug_coords == 0):
+            noise = rng.normal(0, 2.0, size=aug_coords.shape)
+            active = (aug_coords != 0).any(axis=1)
+            aug_coords[active] = aug_coords[active] + noise[active]
+
+        return aug_seq, aug_coords
 
     def _validate_columns(self) -> None:
         """检查构建 Dataset 所需的关键列。"""
@@ -513,5 +553,6 @@ def earthquake_collate_fn(batch: list[dict]) -> dict:
         "seq_padding_mask": seq_padding_mask,
         "global_x": torch.stack([item["global_x"] for item in batch]),
         "y": torch.stack([item["y"] for item in batch]),
+        "mainshock_strike_rad": torch.stack([item["mainshock_strike_rad"] for item in batch]),
         "metadata": [item["metadata"] for item in batch],
     }

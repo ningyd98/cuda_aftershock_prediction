@@ -628,7 +628,7 @@ def run_gnn_oof_cv(df_train, event_df_path, feature_cols, params, n_splits, purg
                 mk = batch["seq_padding_mask"].to(device)
                 opt.zero_grad()
                 with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
-                    loss = stgnn_asymmetric_loss(model(sx, gx, mk, graph_coords_km=coords, graph_time_days=gtd), yb, late_weight=late_weight)
+                    loss = stgnn_asymmetric_loss(model(sx, gx, mk, graph_coords_km=coords, graph_time_days=gtd, graph_strike_rad=batch.get("mainshock_strike_rad")), yb, late_weight=late_weight)
                 if scaler is not None:
                     scaler.scale(loss).backward()
                     scaler.unscale_(opt)
@@ -649,7 +649,7 @@ def run_gnn_oof_cv(df_train, event_df_path, feature_cols, params, n_splits, purg
                     gtd = batch["graph_time_days"].to(device)
                     yb = batch["y"].to(device)
                     mk = batch["seq_padding_mask"].to(device)
-                    pp = model(sx, gx, mk, graph_coords_km=coords, graph_time_days=gtd)
+                    pp = model(sx, gx, mk, graph_coords_km=coords, graph_time_days=gtd, graph_strike_rad=batch.get("mainshock_strike_rad"))
                     v_loss += stgnn_asymmetric_loss(pp, yb, late_weight=late_weight).item() * len(yb)
                     v_cnt += len(yb)
             v_loss /= max(v_cnt, 1)
@@ -673,7 +673,7 @@ def run_gnn_oof_cv(df_train, event_df_path, feature_cols, params, n_splits, purg
                 gtd = batch["graph_time_days"].to(device)
                 yb = batch["y"].to(device)
                 mk = batch["seq_padding_mask"].to(device)
-                pp = model(sx, gx, mk, graph_coords_km=coords, graph_time_days=gtd)
+                pp = model(sx, gx, mk, graph_coords_km=coords, graph_time_days=gtd, graph_strike_rad=batch.get("mainshock_strike_rad"))
                 all_p.append(pp.cpu().numpy())
                 all_t.append(yb.cpu().numpy())
         preds = np.clip(np.concatenate(all_p, axis=0), 0, None)
@@ -888,20 +888,29 @@ def evaluate_on_holdout(true_labels, params, late_weight, n_est_lgb, n_est_xgb, 
 
     pred_df = pd.DataFrame(predictions)
     if len(pred_df) == 0: return {"holdout_combined": float("inf"), "holdout_n": 0}
+    # 传递主震震级用于 Båth 检验
+    ms_mag = None
+    if len(merged_labels := true_labels[true_labels["mainshock_id"].isin(pred_df["mainshock_id"])]):
+        ms_mag = merged_labels.set_index("mainshock_id").reindex(pred_df["mainshock_id"])["mainshock_mag"].to_numpy()
     m = calculate_metrics(
         y_true_mag=pred_df["true_max_mag"].to_numpy(),
         y_pred_mag=pred_df["pred_max_mag"].to_numpy(),
         y_true_time=pred_df["true_time_to_max_days"].to_numpy(),
         y_pred_time=pred_df["pred_time_to_max"].to_numpy(),
         late_weight=late_weight,
+        mainshock_mag=ms_mag,
     )
     return {
         "holdout_mag_rmse": float(m.get("mag_rmse", np.nan)),
         "holdout_mag_mae": float(m.get("mag_mae", np.nan)),
+        "holdout_mag_medae": float(m.get("mag_medae", np.nan)),
         "holdout_time_rmse": float(m.get("time_rmse", np.nan)),
         "holdout_time_mae": float(m.get("time_mae", np.nan)),
+        "holdout_time_medae": float(m.get("time_medae", np.nan)),
         "holdout_time_asymmetric_rmse": float(m.get("time_asymmetric_rmse", np.nan)),
         "holdout_time_asymmetric_mae": float(m.get("time_asymmetric_mae", np.nan)),
+        "holdout_energy_ratio_median": float(m.get("mag_energy_ratio_median", np.nan)),
+        "holdout_bath_deviation": float(m.get("bath_deviation", np.nan)) if "bath_deviation" in m else None,
         "holdout_combined": float(m.get("mag_rmse", 99) + m.get("time_asymmetric_rmse", 99)),
         "holdout_n": len(pred_df),
         "holdout_predictions": pred_df,
@@ -1247,11 +1256,18 @@ def save_results(study, best_params, best_holdout, output_dir, late_weight, incl
 
     if best_holdout.get("holdout_n", 0) > 0:
         print(f"\nHoldout 评估 ({best_holdout['holdout_n']} 条):")
-        for k in ["holdout_mag_rmse", "holdout_mag_mae", "holdout_time_rmse",
-                   "holdout_time_mae", "holdout_time_asymmetric_rmse",
-                   "holdout_time_asymmetric_mae", "holdout_combined"]:
-            v = best_holdout.get(k)
-            if v is not None: print(f"  {k}: {v:.4f}")
+        print(f"  📊 震级: RMSE={best_holdout.get('holdout_mag_rmse',np.nan):.4f}  "
+              f"MAE={best_holdout.get('holdout_mag_mae',np.nan):.4f}  "
+              f"MedAE={best_holdout.get('holdout_mag_medae',np.nan):.4f}")
+        er = best_holdout.get("holdout_energy_ratio_median")
+        if er is not None: print(f"        EnergyRatio(median): {er:.2f}×")
+        print(f"  ⏱️  时间: RMSE={best_holdout.get('holdout_time_rmse',np.nan):.2f}d  "
+              f"MAE={best_holdout.get('holdout_time_mae',np.nan):.2f}d  "
+              f"MedAE={best_holdout.get('holdout_time_medae',np.nan):.2f}d")
+        print(f"  🎯 综合: {best_holdout.get('holdout_combined',np.nan):.4f}  "
+              f"AsymRMSE={best_holdout.get('holdout_time_asymmetric_rmse',np.nan):.2f}")
+        bd = best_holdout.get("holdout_bath_deviation")
+        if bd is not None: print(f"  🔬 Båth ΔM偏差: {bd:.4f}")
 
     print(f"\n产物已保存: {output_dir}")
     print(f"📄 可读报告: {output_dir / 'tuning_report.md'}")
@@ -1311,7 +1327,7 @@ def _write_tuning_report(
     lines.append(f"|:---|---:|:---|")
     lines.append(f"| 震级 RMSE | {mag_rmse:.4f} | 预测余震震级的均方根误差 |")
     lines.append(f"| 时间非对称 RMSE | {time_asym:.4f} | 预测偏晚惩罚 {late_weight:.0f}× 的时间误差 |")
-    lines.append(f"| **综合分 (mag + time)** | **{best_oof:.4f}** | Optuna 优化目标 |")
+    lines.append(f"| **综合分 (mag × {mag_weight:.0f} + time)** | **{best_oof:.4f}** | Optuna 优化目标 |")
     lines.append(f"")
 
     # ── 3. Holdout 测试集评估 ──
@@ -1321,20 +1337,39 @@ def _write_tuning_report(
         lines.append(f"")
         lines.append(f"在 **{holdout_n} 条独立测试序列**上的最终评估（未参与训练/验证）：")
         lines.append(f"")
+        lines.append(f"### 3.1 震级预测")
         lines.append(f"| 指标 | 值 | 说明 |")
         lines.append(f"|:---|---:|:---|")
         for key, label, note in [
-            ("holdout_mag_rmse", "震级 RMSE", "预测余震震级的均方根误差"),
-            ("holdout_mag_mae", "震级 MAE", "平均绝对误差"),
-            ("holdout_time_rmse", "时间 RMSE", "预测时间的均方根误差 (天)"),
-            ("holdout_time_mae", "时间 MAE", "平均绝对时间误差 (天)"),
-            ("holdout_time_asymmetric_rmse", f"时间非对称 RMSE", f"预测偏晚 {late_weight:.0f}× 惩罚"),
-            ("holdout_time_asymmetric_mae", f"时间非对称 MAE", f"非对称平均绝对误差"),
-            ("holdout_combined", "**Holdout 综合分**", "mag_rmse + time_asymmetric_rmse"),
+            ("holdout_mag_rmse", "RMSE", "震级均方根误差"),
+            ("holdout_mag_mae", "MAE", "平均绝对误差"),
+            ("holdout_mag_medae", "MedAE", "中位数绝对误差（鲁棒）"),
         ]:
             v = best_holdout.get(key)
-            if v is not None:
-                lines.append(f"| {label} | {v:.4f} | {note} |")
+            if v is not None: lines.append(f"| {label} | {v:.4f} | {note} |")
+        er = best_holdout.get("holdout_energy_ratio_median")
+        if er is not None: lines.append(f"| Energy Ratio (median) | {er:.2f}× | 典型能量偏差倍数 |")
+        lines.append(f"")
+        lines.append(f"### 3.2 时间预测")
+        lines.append(f"| 指标 | 值 | 说明 |")
+        lines.append(f"|:---|---:|:---|")
+        for key, label, note in [
+            ("holdout_time_rmse", "RMSE", "时间均方根误差（天）"),
+            ("holdout_time_mae", "MAE", "平均绝对误差（天）"),
+            ("holdout_time_medae", "MedAE", "中位数绝对误差（天）"),
+            ("holdout_time_asymmetric_rmse", f"非对称 RMSE", f"预测偏晚 {late_weight:.0f}× 惩罚"),
+            ("holdout_time_asymmetric_mae", f"非对称 MAE", f"非对称平均绝对误差"),
+        ]:
+            v = best_holdout.get(key)
+            if v is not None: lines.append(f"| {label} | {v:.4f} | {note} |")
+        lines.append(f"")
+        lines.append(f"### 3.3 物理一致性")
+        bd = best_holdout.get("holdout_bath_deviation")
+        lines.append(f"| 指标 | 值 | 说明 |")
+        lines.append(f"|:---|---:|:---|")
+        if bd is not None: lines.append(f"| Båth ΔM Deviation | {bd:.4f} | ΔM 预测偏差，越低越好 |")
+        comb = best_holdout.get("holdout_combined")
+        if comb is not None: lines.append(f"| **Holdout 综合分** | **{comb:.4f}** | mag_rmse + time_asymmetric_rmse |")
         lines.append(f"")
 
     # ── 4. 最优融合权重 ──

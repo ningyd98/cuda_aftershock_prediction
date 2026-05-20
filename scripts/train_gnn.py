@@ -86,6 +86,7 @@ def train_one_epoch(model, dataloader, optimizer, device, late_weight=2.0, use_a
                 mask,
                 graph_coords_km=graph_coords_km,
                 graph_time_days=graph_time_days,
+                graph_strike_rad=batch.get("mainshock_strike_rad"),
             )
             loss = stgnn_asymmetric_loss(preds, y, late_weight=late_weight)
 
@@ -124,6 +125,7 @@ def evaluate_model(model, dataloader, device, late_weight=2.0, use_amp=True):
                 mask,
                 graph_coords_km=graph_coords_km,
                 graph_time_days=graph_time_days,
+                graph_strike_rad=batch.get("mainshock_strike_rad"),
             )
             all_preds.append(preds.cpu().numpy())
             all_targets.append(y.cpu().numpy())
@@ -271,7 +273,7 @@ def _run_oof_for_gnn(
                     gtd = batch["graph_time_days"].to(device)
                     yy = batch["y"].to(device)
                     mk = batch["seq_padding_mask"].to(device)
-                    pp = model(sx, gx, mk, graph_coords_km=coords, graph_time_days=gtd)
+                    pp = model(sx, gx, mk, graph_coords_km=coords, graph_time_days=gtd, graph_strike_rad=batch.get("mainshock_strike_rad"))
                     val_loss_total += stgnn_asymmetric_loss(pp, yy, late_weight=args.late_weight).item() * len(yy)
                     val_count += len(yy)
             val_loss = val_loss_total / max(val_count, 1)
@@ -308,7 +310,7 @@ def _run_oof_for_gnn(
                 gtd = batch["graph_time_days"].to(device)
                 yy = batch["y"].to(device)
                 mk = batch["seq_padding_mask"].to(device)
-                pp = model(sx, gx, mk, graph_coords_km=coords, graph_time_days=gtd)
+                pp = model(sx, gx, mk, graph_coords_km=coords, graph_time_days=gtd, graph_strike_rad=batch.get("mainshock_strike_rad"))
                 all_preds.append(pp.cpu().numpy())
                 all_targets.append(yy.cpu().numpy())
 

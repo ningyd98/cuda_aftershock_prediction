@@ -371,6 +371,32 @@ def calculate_temporal_binned_features(
         energy = float(seismic_moment_from_mw(mags[in_window]).sum()) if count > 0 else 0.0
         result[f"count_{h:.0f}h"] = count
         result[f"energy_{h:.0f}h"] = energy
+
+    # 子窗口非累积特征（衰减梯度）
+    # 区间: [0-12h], [12-24h], [24-72h]
+    c12 = result.get("count_12h", 0)
+    c24 = result.get("count_24h", 0)
+    c72 = result.get("count_72h", 0)
+    e12 = result.get("energy_12h", 0.0)
+    e24 = result.get("energy_24h", 0.0)
+    e72 = result.get("energy_72h", 0.0)
+
+    result["count_0_12h"] = c12
+    result["count_12_24h"] = max(0, c24 - c12)
+    result["count_24_72h"] = max(0, c72 - c24)
+    result["energy_0_12h"] = e12
+    result["energy_12_24h"] = max(0.0, e24 - e12)
+    result["energy_24_72h"] = max(0.0, e72 - e24)
+
+    # 衰减斜率: 早期/晚期比值，捕捉 Omori 衰减快慢
+    total_c = max(c72, 1)
+    total_e = max(e72, 1e-10)
+    result["decay_count_ratio_early_late"] = c12 / max(c24 - c12, 1)
+    result["decay_energy_ratio_early_late"] = e12 / max(e24 - e12, 1e-10)
+    # 梯度: (早期 − 晚期) / 总, 正=快速衰减, 负=持续活动
+    result["decay_count_gradient"] = (c12 - result["count_24_72h"]) / total_c
+    result["decay_energy_gradient"] = (e12 - result["energy_24_72h"]) / total_e
+
     return result
 
 

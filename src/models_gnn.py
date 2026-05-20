@@ -46,6 +46,7 @@ class SpatialGraphConv(nn.Module):
         event_times: torch.Tensor | None,
         mask: torch.Tensor,
         event_mags: torch.Tensor | None = None,
+        strike_rad: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -54,6 +55,7 @@ class SpatialGraphConv(nn.Module):
             event_times: (B, N) elapsed days after mainshock
             mask: (B, N) True = padding
             event_mags: (B, N) event magnitudes for magnitude-aware edge weights (optional)
+            strike_rad: (B,) mainshock strike angle in radians (optional, for anisotropic edges)
         Returns:
             (B, N, D_out) updated node features
         """
@@ -64,6 +66,18 @@ class SpatialGraphConv(nn.Module):
 
         adj = torch.exp(-(dists ** 2) / (2 * self.sigma ** 2))  # (B, N, N)
         adj = adj * (dists < self.radius_km).float()
+
+        # ─── 各向异性应力传导：沿断层走向强化，垂直走向抑制 ───
+        if strike_rad is not None:
+            # 计算边方向 azimuth: atan2(dx, dy) where dx=east, dy=north
+            dx = coord_diff[..., 0]  # (B, N, N)
+            dy = coord_diff[..., 1]
+            edge_azimuth = torch.atan2(dx, dy)  # (B, N, N), range [-π, π]
+            # 与走向的夹角
+            theta = edge_azimuth - strike_rad.view(B, 1, 1)  # (B, N, N)
+            # cos(2θ): 沿走向最大=1, 垂直最小=-1 → (1+cos)/2 ∈ [0,1]
+            aniso_weight = (1.0 + torch.cos(2.0 * theta)) * 0.5
+            adj = adj * aniso_weight
 
         # ─── 震级感知边权重：对应 ETAS 触发能力 ∝ exp(α·(M - Mc)) ───
         if event_mags is not None:
@@ -211,6 +225,7 @@ class STGNNPredictor(nn.Module):
         seq_padding_mask: torch.Tensor,
         graph_coords_km: torch.Tensor | None = None,
         graph_time_days: torch.Tensor | None = None,
+        graph_strike_rad: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -219,6 +234,7 @@ class STGNNPredictor(nn.Module):
             seq_padding_mask: (B, N) True = padding
             graph_coords_km: (B, N, 2) 未标准化空间坐标，单位 km
             graph_time_days: (B, N) 未标准化相对时间，单位天
+            graph_strike_rad: (B,) 主震走向弧度（可选，用于各向异性边）
         Returns:
             (B, 2) predictions
         """
@@ -236,7 +252,8 @@ class STGNNPredictor(nn.Module):
         # GNN blocks
         for block in self.gnn_blocks:
             h_res = h
-            h = block["spatial"](h, coords, event_times, seq_padding_mask, event_mags=event_mags)
+            h = block["spatial"](h, coords, event_times, seq_padding_mask,
+                                  event_mags=event_mags, strike_rad=graph_strike_rad)
             h = block["norm1"](h + h_res)
             h = block["dropout"](h)
 
