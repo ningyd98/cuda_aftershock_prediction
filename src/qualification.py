@@ -37,6 +37,73 @@ QUALIFICATION_WINDOWS: tuple[QualificationWindow, ...] = (
     QualificationWindow("T3", 72.0, 168.0),
 )
 WINDOW_BY_NAME = {window.name: window for window in QUALIFICATION_WINDOWS}
+WINDOW_OBSERVATION_HOURS = {
+    "T1": 0.0,
+    "T2": 24.0,
+    "T3": 72.0,
+}
+
+_LEGAL_META_COLS = {
+    "mainshock_id",
+    "mainshock_time",
+    "mainshock_lat",
+    "mainshock_lon",
+    "mainshock_mag",
+    "mainshock_depth",
+    "has_target_aftershock",
+    "target_max_mag",
+    "target_time_to_max_days",
+}
+_STATIC_FEATURE_COLS = {
+    "mainshock_mag",
+    "mainshock_depth",
+    "plate_boundary_distance_km",
+    "strike1",
+    "dip1",
+    "rake1",
+    "strike2",
+    "dip2",
+    "rake2",
+    "plunge_P",
+    "trend_P",
+    "plunge_T",
+    "trend_T",
+    "f_clvd",
+    "gcmt_time_diff_seconds",
+    "gcmt_distance_km",
+    "focal_mechanism_valid",
+}
+_STATIC_PREFIXES = ("plate_type_", "fault_type_")
+_OBS_HOUR_MARKS = (1, 6, 12, 24, 72)
+_FULL_OBSERVATION_PREFIXES = (
+    "early_",
+    "gr_",
+    "omori_",
+    "anisotropy_",
+    "count_",
+    "energy_",
+    "etas_",
+    "bath_",
+    "productivity_",
+    "mag_ratio_",
+    "mag_diff_",
+    "energy_per_",
+    "log_energy_",
+    "count_ratio_",
+    "energy_ratio_",
+    "omori_p_",
+    "omori_decay_",
+    "etas_p_",
+    "aniso_",
+    "plate_dist_",
+    "log_plate_",
+    "b_value_",
+    "log_depth",
+    "depth_mag_",
+    "productivity_per_",
+    "decay_count_",
+    "decay_energy_",
+)
 
 
 def qualification_target_cols() -> list[str]:
@@ -48,6 +115,119 @@ def qualification_target_cols() -> list[str]:
 
 def qualification_aux_cols() -> list[str]:
     return [window.flag_col for window in QUALIFICATION_WINDOWS]
+
+
+def observation_hours_for_window(window_name: str) -> float:
+    if window_name not in WINDOW_OBSERVATION_HOURS:
+        raise KeyError(f"Unknown qualification window: {window_name}")
+    return WINDOW_OBSERVATION_HOURS[window_name]
+
+
+def reconstruct_legal_window_features(
+    feature_df: pd.DataFrame,
+    window_name: str,
+) -> pd.DataFrame:
+    """Return a feature frame that only exposes observations legal for a window.
+
+    The original project feature table is built from a 72-hour early-aftershock
+    observation window. That is legal for T3, but it leaks future information for
+    T1 and T2. This helper keeps static mainshock/geology/GCMT features for every
+    window, adds only 0-24h cumulative count/energy signals for T2, and allows
+    the full 0-72h feature set only for T3.
+    """
+
+    if window_name not in WINDOW_BY_NAME:
+        raise KeyError(f"Unknown qualification window: {window_name}")
+
+    source = feature_df.copy()
+    obs_hours = observation_hours_for_window(window_name)
+    legal_cols: set[str] = set(_LEGAL_META_COLS)
+    legal_cols.update(qualification_target_cols())
+    legal_cols.update(qualification_aux_cols())
+    legal_cols.update(_STATIC_FEATURE_COLS)
+    legal_cols.update(
+        col for col in source.columns if col.startswith(_STATIC_PREFIXES)
+    )
+
+    if obs_hours >= 72.0:
+        legal_cols.update(
+            col for col in source.columns if col.startswith(_FULL_OBSERVATION_PREFIXES)
+        )
+    elif obs_hours >= 24.0:
+        for hour in _OBS_HOUR_MARKS:
+            if hour <= int(obs_hours):
+                legal_cols.add(f"count_{hour}h")
+                legal_cols.add(f"energy_{hour}h")
+
+    existing_cols = [col for col in source.columns if col in legal_cols]
+    result = source.loc[:, existing_cols].copy()
+
+    if obs_hours <= 0.0:
+        result["count_obs_0h"] = 0.0
+        result["energy_obs_0h"] = 0.0
+        return result
+
+    obs_tag = f"{int(obs_hours)}h"
+    obs_count_col = f"count_{obs_tag}"
+    obs_energy_col = f"energy_{obs_tag}"
+    obs_count = (
+        pd.to_numeric(source[obs_count_col], errors="coerce").fillna(0.0)
+        if obs_count_col in source.columns
+        else pd.Series(0.0, index=source.index)
+    )
+    obs_energy = (
+        pd.to_numeric(source[obs_energy_col], errors="coerce").fillna(0.0)
+        if obs_energy_col in source.columns
+        else pd.Series(0.0, index=source.index)
+    )
+    result["early_aftershock_count"] = obs_count
+    result["advanced_early_event_count"] = obs_count
+    result["early_energy_sum"] = obs_energy
+    result[f"count_obs_{obs_tag}"] = obs_count
+    result[f"energy_obs_{obs_tag}"] = obs_energy
+    result["energy_per_event"] = obs_energy / obs_count.clip(lower=1.0)
+    result["log_energy_sum"] = np.log1p(obs_energy.clip(lower=0.0))
+
+    for hour in _OBS_HOUR_MARKS:
+        if hour > int(obs_hours):
+            continue
+        count_col = f"count_{hour}h"
+        energy_col = f"energy_{hour}h"
+        if count_col in source.columns:
+            count_values = pd.to_numeric(source[count_col], errors="coerce").fillna(0.0)
+            result[f"count_ratio_{hour}h_obs"] = count_values / obs_count.clip(lower=1.0)
+            result[f"count_rate_{hour}h"] = count_values / float(hour)
+        if energy_col in source.columns:
+            energy_values = pd.to_numeric(source[energy_col], errors="coerce").fillna(0.0)
+            result[f"energy_ratio_{hour}h_obs"] = energy_values / obs_energy.clip(lower=1e-10)
+            result[f"energy_rate_{hour}h"] = energy_values / float(hour)
+
+    if obs_hours >= 24.0 and {"count_12h", "count_24h"}.issubset(source.columns):
+        count_12h = pd.to_numeric(source["count_12h"], errors="coerce").fillna(0.0)
+        count_24h = pd.to_numeric(source["count_24h"], errors="coerce").fillna(0.0)
+        result["count_0_12h"] = count_12h
+        result["count_12_24h"] = (count_24h - count_12h).clip(lower=0.0)
+        result["decay_count_gradient"] = (
+            count_12h - (count_24h - count_12h).clip(lower=0.0)
+        ) / count_24h.clip(lower=1.0)
+    if obs_hours >= 24.0 and {"energy_12h", "energy_24h"}.issubset(source.columns):
+        energy_12h = pd.to_numeric(source["energy_12h"], errors="coerce").fillna(0.0)
+        energy_24h = pd.to_numeric(source["energy_24h"], errors="coerce").fillna(0.0)
+        result["energy_0_12h"] = energy_12h
+        result["energy_12_24h"] = (energy_24h - energy_12h).clip(lower=0.0)
+        result["decay_energy_gradient"] = (
+            energy_12h - (energy_24h - energy_12h).clip(lower=0.0)
+        ) / energy_24h.clip(lower=1e-10)
+
+    if "mainshock_mag" in source.columns:
+        result["obs_count_per_main_mag"] = obs_count / pd.to_numeric(
+            source["mainshock_mag"], errors="coerce"
+        ).clip(lower=1.0)
+        result["obs_energy_per_main_mag"] = obs_energy / pd.to_numeric(
+            source["mainshock_mag"], errors="coerce"
+        ).clip(lower=1.0)
+
+    return result
 
 
 def normalize_event_table(raw_df: pd.DataFrame) -> pd.DataFrame:

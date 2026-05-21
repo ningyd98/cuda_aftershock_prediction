@@ -36,7 +36,12 @@ def metric_table(metrics: dict) -> str:
         "|:--|:--|--:|--:|--:|",
     ]
     for window, models in metrics.get("window_metrics", {}).items():
-        for model_name, values in models.items():
+        if "legal_risk_fusion" in models:
+            rows = {"legal_risk_fusion": models["legal_risk_fusion"]}
+            rows.update(models.get("models", {}))
+        else:
+            rows = models
+        for model_name, values in rows.items():
             lines.append(
                 "| {window} | {model} | {mag:.4f} | {time:.4f} | {hit:.2%} |".format(
                     window=window,
@@ -72,7 +77,7 @@ def main() -> None:
         "",
         "```bash",
         "python main.py build-qualification-labels",
-        "python main.py train-window-baseline --model-type both --device cuda",
+        "python main.py train-legal-fusion --model-type both --device cuda",
         "python main.py make-qualification-package --commitment-template /path/to/template",
         "```",
         "",

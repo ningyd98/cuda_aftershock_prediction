@@ -10,6 +10,7 @@ from src.qualification import (
     mainshock_token,
     normalize_event_table,
     pick_mainshock,
+    reconstruct_legal_window_features,
 )
 
 
@@ -42,3 +43,44 @@ def test_submission_line_format():
     }
     line = format_qualification_line(mainshock, "T1", 5.44, 17.5)
     assert line == "20080512062804 103.40 31.00 8.0 5.4 (Ms) 2008051300"
+
+
+def test_legal_window_feature_reconstruction_blocks_future_observations():
+    features = pd.DataFrame(
+        [
+            {
+                "mainshock_id": "x",
+                "mainshock_time": "2020-01-01T00:00:00Z",
+                "mainshock_mag": 7.0,
+                "mainshock_depth": 10.0,
+                "count_1h": 2,
+                "count_24h": 8,
+                "count_72h": 50,
+                "energy_1h": 10.0,
+                "energy_24h": 100.0,
+                "energy_72h": 900.0,
+                "early_max_mag": 6.5,
+                "gr_b_value": 0.8,
+                "omori_p": 1.1,
+                "target_T1_max_mag": 5.0,
+                "target_T1_time_to_max_hours": 2.0,
+                "target_T2_max_mag": 5.5,
+                "target_T2_time_to_max_hours": 30.0,
+                "target_T3_max_mag": 5.8,
+                "target_T3_time_to_max_hours": 90.0,
+            }
+        ]
+    )
+
+    t1 = reconstruct_legal_window_features(features, "T1")
+    t2 = reconstruct_legal_window_features(features, "T2")
+    t3 = reconstruct_legal_window_features(features, "T3")
+
+    assert "count_24h" not in t1.columns
+    assert "early_max_mag" not in t1.columns
+    assert "count_24h" in t2.columns
+    assert "count_72h" not in t2.columns
+    assert "early_max_mag" not in t2.columns
+    assert t2.loc[0, "early_aftershock_count"] == 8
+    assert "count_72h" in t3.columns
+    assert "early_max_mag" in t3.columns

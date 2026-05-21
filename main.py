@@ -26,6 +26,7 @@ SCRIPT_MAP = {
     "train-dl": PROJECT_ROOT / "scripts" / "train_dl.py",
     "train-ensemble": PROJECT_ROOT / "scripts" / "train_ensemble.py",
     "train-gnn": PROJECT_ROOT / "scripts" / "train_gnn.py",
+    "train-legal-fusion": PROJECT_ROOT / "scripts" / "train_legal_fusion.py",
     "train-window-baseline": PROJECT_ROOT / "scripts" / "train_window_baseline.py",
 }
 
