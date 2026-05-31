@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Large model / data artifacts (choose to ignore or track via LFS)
+*.joblib
+*.pt
+*.zip
+*.zip.sha256
+
+# Submission packages (generated)
+submission_packages/
+submissions/
+
+# Temp
+tmp/
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+
+# LaTeX build artifacts
+*.aux
+*.fdb_latexmk
+*.fls
+*.out
+*.toc
+*.xdv
+
+# Environment
+venv/
+.venv/
+
+# Decoupled tuning artifacts
+data/tuning_results/
+*/tuning_trials.csv
+*_oof_predictions.csv
+*_oof_metrics.csv
+best_oof_predictions.csv
+best_oof_metrics.json
+
+# Generated packages
+submission_package*/
+qualification_submission*.zip
+qualification_submission*.sha256
+
+# Temp
+tmp/
