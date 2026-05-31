@@ -1,0 +1,48 @@
+{
+  "global": {
+    "seed": 42,
+    "oof_fusion": true,
+    "dl_enabled": false,
+    "gnn_enabled": false,
+    "version": "single_horizon_v1"
+  },
+  "mag_model": {
+    "n_estimators": 300,
+    "learning_rate": 0.02,
+    "num_leaves": 15,
+    "min_child_samples": 20,
+    "subsample": 0.6,
+    "colsample_bytree": 1.0,
+    "reg_alpha": 0.1,
+    "reg_lambda": 1.0
+  },
+  "time_model": {
+    "n_estimators": 500,
+    "learning_rate": 0.02,
+    "num_leaves": 31,
+    "min_child_samples": 5,
+    "subsample": 0.7,
+    "colsample_bytree": 0.8,
+    "reg_alpha": 0.0,
+    "reg_lambda": 0.5
+  },
+  "extreme_model": {
+    "extreme_margin": 2.0,
+    "n_estimators": 200,
+    "learning_rate": 0.02,
+    "num_leaves": 15,
+    "subsample": 0.7,
+    "colsample_bytree": 0.6
+  },
+  "fusion": {
+    "mag": {
+      "oof_mag_lgbm": 0.68,
+      "oof_mag_xgb": 0.31999999999999995
+    },
+    "time": {
+      "oof_time_bucket_raw": 0.88,
+      "oof_time_direct_lgbm_raw": 0.04,
+      "oof_time_direct_xgb_raw": 0.07999999999999999
+    }
+  }
+}

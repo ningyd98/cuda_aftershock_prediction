@@ -1,0 +1,183 @@
+{
+  "windows": {
+    "T1": {
+      "mag_model": {
+        "n_estimators": 300,
+        "learning_rate": 0.03,
+        "num_leaves": 31,
+        "min_child_samples": 20,
+        "subsample": 1.0,
+        "colsample_bytree": 0.8,
+        "reg_alpha": 0.01,
+        "reg_lambda": 5.0
+      },
+      "time_model": {
+        "n_estimators": 800,
+        "learning_rate": 0.01,
+        "num_leaves": 63,
+        "min_child_samples": 30,
+        "subsample": 0.9,
+        "colsample_bytree": 0.8,
+        "reg_alpha": 0.0,
+        "reg_lambda": 0.5
+      },
+      "extreme_model": {
+        "extreme_margin": 2.0,
+        "n_estimators": 200,
+        "learning_rate": 0.01,
+        "num_leaves": 15,
+        "subsample": 0.8,
+        "colsample_bytree": 0.9
+      },
+      "postprocessing": {
+        "mag_bias_T1": 0.0,
+        "mag_bias_T2": -0.1,
+        "mag_bias_T3": 0.1,
+        "time_bias_T1": 0.0,
+        "time_bias_T2": 2.0,
+        "time_bias_T3": 12.0,
+        "extreme_prob_threshold": 0.4,
+        "high_risk_mag_quantile_weight": 0.7,
+        "early_time_shift_strength": 0.2,
+        "t1_early_delta_bonus": 0.2
+      },
+      "fusion": {
+        "mag": {
+          "oof_mag_lgbm": 1.0
+        },
+        "time": {
+          "oof_time_bucket_expected": 1.0
+        },
+        "extreme": {
+          "oof_extreme_prob_lgbm": 1.0
+        }
+      }
+    },
+    "T2": {
+      "mag_model": {
+        "n_estimators": 300,
+        "learning_rate": 0.03,
+        "num_leaves": 63,
+        "min_child_samples": 100,
+        "subsample": 0.7,
+        "colsample_bytree": 1.0,
+        "reg_alpha": 0.5,
+        "reg_lambda": 0.0
+      },
+      "time_model": {
+        "n_estimators": 200,
+        "learning_rate": 0.07,
+        "num_leaves": 127,
+        "min_child_samples": 15,
+        "subsample": 0.8,
+        "colsample_bytree": 0.5,
+        "reg_alpha": 0.0,
+        "reg_lambda": 0.5
+      },
+      "extreme_model": {
+        "extreme_margin": 2.0,
+        "n_estimators": 100,
+        "learning_rate": 0.02,
+        "num_leaves": 15,
+        "subsample": 0.8,
+        "colsample_bytree": 0.9
+      },
+      "postprocessing": {
+        "mag_bias_T1": 0.0,
+        "mag_bias_T2": -0.1,
+        "mag_bias_T3": 0.1,
+        "time_bias_T1": 0.0,
+        "time_bias_T2": 2.0,
+        "time_bias_T3": 12.0,
+        "extreme_prob_threshold": 0.4,
+        "high_risk_mag_quantile_weight": 0.7,
+        "early_time_shift_strength": 0.2,
+        "t1_early_delta_bonus": 0.2
+      },
+      "fusion": {
+        "mag": {
+          "oof_mag_lgbm": 1.0
+        },
+        "time": {
+          "oof_time_bucket_expected": 1.0
+        },
+        "extreme": {
+          "oof_extreme_prob_lgbm": 1.0
+        }
+      }
+    },
+    "T3": {
+      "mag_model": {
+        "n_estimators": 500,
+        "learning_rate": 0.02,
+        "num_leaves": 15,
+        "min_child_samples": 100,
+        "subsample": 0.7,
+        "colsample_bytree": 0.4,
+        "reg_alpha": 1.0,
+        "reg_lambda": 0.5
+      },
+      "time_model": {
+        "n_estimators": 500,
+        "learning_rate": 0.05,
+        "num_leaves": 63,
+        "min_child_samples": 15,
+        "subsample": 0.6,
+        "colsample_bytree": 0.7,
+        "reg_alpha": 0.0,
+        "reg_lambda": 1.0
+      },
+      "extreme_model": {
+        "extreme_margin": 2.0,
+        "n_estimators": 100,
+        "learning_rate": 0.01,
+        "num_leaves": 15,
+        "subsample": 1.0,
+        "colsample_bytree": 0.6
+      },
+      "postprocessing": {
+        "mag_bias_T1": 0.0,
+        "mag_bias_T2": -0.1,
+        "mag_bias_T3": 0.1,
+        "time_bias_T1": 0.0,
+        "time_bias_T2": 2.0,
+        "time_bias_T3": 12.0,
+        "extreme_prob_threshold": 0.4,
+        "high_risk_mag_quantile_weight": 0.7,
+        "early_time_shift_strength": 0.2,
+        "t1_early_delta_bonus": 0.2
+      },
+      "fusion": {
+        "mag": {
+          "oof_mag_lgbm": 1.0
+        },
+        "time": {
+          "oof_time_bucket_expected": 1.0
+        },
+        "extreme": {
+          "oof_extreme_prob_lgbm": 1.0
+        }
+      }
+    }
+  },
+  "global": {
+    "seed": 42,
+    "separate_target_tuning": true,
+    "oof_fusion": true,
+    "dl_enabled": false,
+    "gnn_enabled": false,
+    "pp_best_score": 15.86355156715602
+  },
+  "postprocessing": {
+    "mag_bias_T1": 0.0,
+    "mag_bias_T2": 0.0,
+    "mag_bias_T3": 0.1,
+    "time_bias_T1": -1.0,
+    "time_bias_T2": -6.0,
+    "time_bias_T3": 0.0,
+    "extreme_prob_threshold": 0.6,
+    "high_risk_mag_quantile_weight": 0.7,
+    "early_time_shift_strength": 0.1,
+    "t1_early_delta_bonus": 0.5
+  }
+}

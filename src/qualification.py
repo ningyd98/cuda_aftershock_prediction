@@ -36,11 +36,19 @@ QUALIFICATION_WINDOWS: tuple[QualificationWindow, ...] = (
     QualificationWindow("T2", 24.0, 72.0),
     QualificationWindow("T3", 72.0, 168.0),
 )
+# ── 单窗口 H168 (0-168h) —— formal final prediction ──
+H168_WINDOW = QualificationWindow("H168", 0.0, 168.0)
+H168_MAG_COL = H168_WINDOW.mag_col      # "target_H168_max_mag"
+H168_TIME_COL = H168_WINDOW.time_col     # "target_H168_time_to_max_hours"
+H168_FLAG_COL = H168_WINDOW.flag_col     # "has_H168_aftershock"
+
 WINDOW_BY_NAME = {window.name: window for window in QUALIFICATION_WINDOWS}
+WINDOW_BY_NAME["H168"] = H168_WINDOW
 WINDOW_OBSERVATION_HOURS = {
     "T1": 0.0,
     "T2": 24.0,
     "T3": 72.0,
+    "H168": 0.0,  # default formal model: no aftershock observations
 }
 
 _LEGAL_META_COLS = {
@@ -543,3 +551,123 @@ def write_qualification_prediction_files(
 def iter_prediction_files(predictions_dir: Path) -> Iterable[Path]:
     yield from sorted(predictions_dir.glob("*-T1-T2.csv"))
     yield from sorted(predictions_dir.glob("*-T3.csv"))
+
+
+# ========================================================================
+# H168 single-horizon helpers
+# ========================================================================
+
+def derive_h168_labels(df: pd.DataFrame) -> pd.DataFrame:
+    """从 T1/T2/T3 标签列推导 H168 单窗口标签。
+
+    规则：
+    - 取 T1/T2/T3 中 mag 最大者；若并列取时间最早者。
+    - 若三窗口均无余震（mag 均为 0），H168 也无余震：
+      mag=0.0, time=84.0h (midpoint), has_H168_aftershock=False。
+    - 新增列：target_H168_max_mag, target_H168_time_to_max_hours, has_H168_aftershock。
+    """
+    result = df.copy()
+    t1m, t2m, t3m = "target_T1_max_mag", "target_T2_max_mag", "target_T3_max_mag"
+    t1t, t2t, t3t = "target_T1_time_to_max_hours", "target_T2_time_to_max_hours", "target_T3_time_to_max_hours"
+
+    mags = df[[t1m, t2m, t3m]].fillna(0.0).to_numpy(dtype=float)
+    times = df[[t1t, t2t, t3t]].fillna(84.0).to_numpy(dtype=float)
+
+    best_mag = np.max(mags, axis=1)
+    # 对每行，找出 mag==best_mag 的列索引，取其中 time 最小的
+    best_time = np.full(len(df), 84.0, dtype=float)
+    for i in range(len(df)):
+        mask = mags[i] == best_mag[i]
+        if best_mag[i] > 0 and mask.any():
+            best_time[i] = np.min(times[i][mask])
+
+    result[H168_MAG_COL] = best_mag
+    result[H168_TIME_COL] = best_time
+    result[H168_FLAG_COL] = best_mag > 0.0
+    return result
+
+
+def reconstruct_h168_features(feature_df: pd.DataFrame) -> pd.DataFrame:
+    """返回仅包含静态/主震特征的 H168 合法特征表。
+
+    H168 的默认 formal 模型不允许使用任何余震观测特征
+    （0-24h 计数/能量等），只保留：
+    - 主震元数据（mainshock_id, mainshock_time, lat/lon/mag/depth）
+    - 静态地质/GCMT 特征
+    - 0h 占位符（count_obs_0h=0, energy_obs_0h=0）
+    - H168 标签列（若存在）
+    """
+    source = feature_df.copy()
+    obs_hours = 0.0
+    legal_cols: set[str] = set(_LEGAL_META_COLS)
+    legal_cols.update([H168_MAG_COL, H168_TIME_COL, H168_FLAG_COL])
+    legal_cols.update(qualification_target_cols())
+    legal_cols.update(qualification_aux_cols())
+    legal_cols.update(_STATIC_FEATURE_COLS)
+    legal_cols.update(col for col in source.columns if col.startswith(_STATIC_PREFIXES))
+
+    existing_cols = [col for col in source.columns if col in legal_cols]
+    result = source.loc[:, existing_cols].copy()
+    result["count_obs_0h"] = 0.0
+    result["energy_obs_0h"] = 0.0
+    return result
+
+
+def h168_target_cols() -> list[str]:
+    """返回 H168 单窗口的目标列名。"""
+    return [H168_MAG_COL, H168_TIME_COL]
+
+
+def format_single_horizon_line(
+    mainshock: pd.Series | dict,
+    mag: float,
+    time_hours: float,
+    magnitude_type: str = "Ms",
+) -> str:
+    """单窗口 formal 预测行。
+    
+    格式：mainshock_token(YYYYMMDDhhmmss) lon lat mainshock_mag pred_mag (Ms) pred_time_YYYYMMDDhh
+    """
+    safe_mag, safe_time = clamp_prediction_to_window(
+        "H168",
+        mag=mag,
+        time_hours=time_hours,
+        mainshock_mag=float(mainshock["mag"]),
+    )
+    ms_time = pd.Timestamp(mainshock["time"])
+    if ms_time.tzinfo is None:
+        ms_time = ms_time.tz_localize("UTC")
+    pred_time_str = format_prediction_time(ms_time, safe_time)
+    token = mainshock_token(mainshock)
+    return (
+        f"{token} "
+        f"{float(mainshock['longitude']):.2f} "
+        f"{float(mainshock['latitude']):.2f} "
+        f"{float(mainshock['mag']):.1f} "
+        f"{safe_mag:.1f} ({magnitude_type}) "
+        f"{pred_time_str}"
+    )
+
+
+def write_single_horizon_prediction_file(
+    output_dir: Path,
+    rows: list[tuple[pd.Series | dict, float, float]],
+    magnitude_type: str = "Ms",
+) -> Path:
+    """将所有主震的单窗口预测写入 qualification_predictions.csv。
+    
+    Args:
+        output_dir: predictions/ 目录
+        rows: [(mainshock, pred_mag, pred_time_hours), ...]
+    
+    Returns:
+        写入的文件路径
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    lines = [
+        format_single_horizon_line(ms, mag, th, magnitude_type=magnitude_type)
+        for ms, mag, th in rows
+    ]
+    path = output_dir / "qualification_predictions.csv"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path

@@ -103,6 +103,13 @@ TUNE_FULL=false
 TUNE_FAST=false
 REALTIME=false
 
+# ---- qualification 子命令委托 ----
+if [[ "${1:-}" == "qualification" ]]; then
+    shift
+    exec bash "${SCRIPT_DIR}/scripts/run_qualification_pipeline.sh" "$@"
+fi
+
+# ---- 旧版参数解析 ----
 while [[ $# -gt 0 ]]; do
     arg="$1"
     case "$arg" in

@@ -1,0 +1,40 @@
+{
+  "created_at": "2026-05-20T16:21:28.482017+00:00",
+  "data": "/home/ningyd/CodingSpace/aftershock_qualification_train/data/processed/qualification_features.csv",
+  "feature_count": 109,
+  "models": [
+    "baseline"
+  ],
+  "window_metrics": {
+    "T1": {
+      "baseline": {
+        "mag_rmse": 0.18878327470160472,
+        "mag_mae": 0.06110946253378985,
+        "time_hour_rmse": 2.878096988429901,
+        "time_hour_mae": 1.5002234519496571,
+        "time_hour_asymmetric_rmse": 3.218224619034264,
+        "time_hour_hit_rate": 0.8438216560509554
+      }
+    },
+    "T2": {
+      "baseline": {
+        "mag_rmse": 0.33977660612136934,
+        "mag_mae": 0.10255106710437122,
+        "time_hour_rmse": 10.656618702231189,
+        "time_hour_mae": 6.141579315485627,
+        "time_hour_asymmetric_rmse": 12.813811122524424,
+        "time_hour_hit_rate": 0.7261146496815286
+      }
+    },
+    "T3": {
+      "baseline": {
+        "mag_rmse": 2.025360045766134,
+        "mag_mae": 1.5269042136390687,
+        "time_hour_rmse": 20.35054716184237,
+        "time_hour_mae": 13.490998946862865,
+        "time_hour_asymmetric_rmse": 24.25608430823097,
+        "time_hour_hit_rate": 0.7732484076433122
+      }
+    }
+  }
+}

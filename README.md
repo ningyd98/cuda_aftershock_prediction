@@ -43,6 +43,7 @@
 
 ```bash
 chmod +x run.sh
+./run.sh qualification --no-install  # 资格赛最终包：hybrid + 后校准，默认不含承诺书
 ./run.sh --skip-download              # 快速稳定版：LightGBM + XGBoost (CUDA)
 ./run.sh --skip-download --with-dl    # 额外训练 Transformer (CUDA)
 ./run.sh --skip-download --with-gnn   # 额外训练 ST-GNN (CUDA)
@@ -52,6 +53,49 @@ chmod +x run.sh
 ./run.sh --realtime                   # 实时监控模式 (持续轮询 USGS API)
 ./run.sh train-only                   # 只重训模型并重新生成提交
 ```
+
+### 资格赛提交包
+
+#### Formal 路径：T1/T2/T3 三窗口（推荐）
+
+**比赛要求每个测试序列输出两个文件：`{mainshock}-T1-T2.csv` 和 `{mainshock}-T3.csv`。**
+其中 `T1-T2` 文件为 2 行，分别对应主震后 0-24h、24-72h 最大余震；
+`T3` 文件为 1 行，对应主震后 72-168h 最大余震。
+
+```bash
+# 推荐检查包：hybrid calibrated，生成 T1/T2/T3 三窗口提交包
+./run.sh qualification \
+  --output-dir submission_package_final_t123_no_commitment \
+  --zip-path qualification_submission_final_t123_no_commitment.zip \
+  --device cpu --no-install --clean
+
+# 可选：使用 decoupled 震级/时间分离模型生成三窗口提交包
+./run.sh qualification --use-decoupled \
+  --decoupled-model-path data/models/qualification_decoupled_v2_full/qualification_decoupled_models.joblib \
+  --decoupled-output-dir submission_package_decoupled_final_no_commitment \
+  --decoupled-zip-path qualification_submission_decoupled_final_no_commitment.zip \
+  --device cpu --no-install --clean
+```
+
+正式输出目录 `predictions/` 应包含每个主震 2 个文件：
+- `{YYYYMMDDhhmmss}-T1-T2.csv`：2 行，分别为 T1、T2。
+- `{YYYYMMDDhhmmss}-T3.csv`：1 行，为 T3。
+
+#### Auxiliary 路径：Single-Horizon H168（辅助实验）
+
+H168 单窗口模型只保留为辅助对比实验，不作为当前比赛正式提交格式。
+
+```bash
+# 辅助实验：一个 0-168h 最大余震预测文件
+./run.sh qualification --use-single-horizon --device cpu --no-install
+```
+
+输出：
+- `qualification_submission_final_t123_no_commitment.zip`
+- `submission_package_final_t123_no_commitment/predictions/*-T1-T2.csv`
+- `submission_package_final_t123_no_commitment/predictions/*-T3.csv`
+
+详细说明参见 `reports/decoupled_tuning_plan.md`。
 
 ## 分步命令
 
@@ -517,4 +561,5 @@ python scripts/batch_oof_inference.py \
 - ✅ 全程序 CUDA 加速 (LightGBM GPU + PyTorch CUDA，默认启用，优雅回退)
 - ✅ 全模型联合超参数调优 (Optuna: LGB + XGB + Transformer + ST-GNN)
 - ✅ 调优全流程 tqdm 进度条可视化 (Fold/Epoch/Batch/Simplex/Holdout 全覆盖)
+- ✅ Decoupled 管道：震级/时间分离训练 + 时间桶分类 + Optuna 调参
 - ⬜ LLM 微调 (Chronos/TimeGPT)

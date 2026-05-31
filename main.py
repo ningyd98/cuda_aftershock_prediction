@@ -19,6 +19,7 @@ SCRIPT_MAP = {
     "download-pb2002": PROJECT_ROOT / "scripts" / "download_pb2002.py",
     "download-usgs": PROJECT_ROOT / "scripts" / "download_usgs.py",
     "generate-experiment-report": PROJECT_ROOT / "scripts" / "generate_experiment_report.py",
+    "make-hybrid-qualification-package": PROJECT_ROOT / "scripts" / "make_hybrid_qualification_package.py",
     "make-qualification-package": PROJECT_ROOT / "scripts" / "make_qualification_package.py",
     "make-submission": PROJECT_ROOT / "scripts" / "make_submission.py",
     "mock-evaluation": PROJECT_ROOT / "scripts" / "mock_evaluation.py",
@@ -28,6 +29,13 @@ SCRIPT_MAP = {
     "train-gnn": PROJECT_ROOT / "scripts" / "train_gnn.py",
     "train-legal-fusion": PROJECT_ROOT / "scripts" / "train_legal_fusion.py",
     "train-window-baseline": PROJECT_ROOT / "scripts" / "train_window_baseline.py",
+    "train-decoupled-window-models": PROJECT_ROOT / "scripts" / "train_decoupled_window_models.py",
+    "tune-decoupled-models": PROJECT_ROOT / "scripts" / "tune_decoupled_models.py",
+    "make-decoupled-qualification-package": PROJECT_ROOT / "scripts" / "make_decoupled_qualification_package.py",
+    # ── single-horizon H168 ──
+    "tune-single-horizon-models": PROJECT_ROOT / "scripts" / "tune_single_horizon_models.py",
+    "train-single-horizon-models": PROJECT_ROOT / "scripts" / "train_single_horizon_models.py",
+    "make-single-horizon-package": PROJECT_ROOT / "scripts" / "make_single_horizon_package.py",
 }
 
 

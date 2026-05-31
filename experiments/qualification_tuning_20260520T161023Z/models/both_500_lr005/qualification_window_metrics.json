@@ -1,0 +1,65 @@
+{
+  "created_at": "2026-05-20T16:33:02.054731+00:00",
+  "data": "/home/ningyd/CodingSpace/aftershock_qualification_train/data/processed/qualification_features.csv",
+  "feature_count": 109,
+  "models": [
+    "baseline",
+    "xgboost"
+  ],
+  "window_metrics": {
+    "T1": {
+      "baseline": {
+        "mag_rmse": 0.19428882533846675,
+        "mag_mae": 0.06781194286560523,
+        "time_hour_rmse": 3.1135863919388527,
+        "time_hour_mae": 1.6347530879209835,
+        "time_hour_asymmetric_rmse": 3.413470289684727,
+        "time_hour_hit_rate": 0.8410191082802547
+      },
+      "xgboost": {
+        "mag_rmse": 0.18880739754916598,
+        "mag_mae": 0.057476258312206666,
+        "time_hour_rmse": 3.0320533229886855,
+        "time_hour_mae": 1.5233128427539162,
+        "time_hour_asymmetric_rmse": 3.2841898359072133,
+        "time_hour_hit_rate": 0.8430573248407643
+      }
+    },
+    "T2": {
+      "baseline": {
+        "mag_rmse": 0.3490938019515031,
+        "mag_mae": 0.11096123574604268,
+        "time_hour_rmse": 9.645764465916598,
+        "time_hour_mae": 5.645536114208702,
+        "time_hour_asymmetric_rmse": 11.236265845813048,
+        "time_hour_hit_rate": 0.7327388535031847
+      },
+      "xgboost": {
+        "mag_rmse": 0.344085829022485,
+        "mag_mae": 0.09772133703264983,
+        "time_hour_rmse": 9.274974703953113,
+        "time_hour_mae": 5.254935671013552,
+        "time_hour_asymmetric_rmse": 10.734131008251325,
+        "time_hour_hit_rate": 0.732484076433121
+      }
+    },
+    "T3": {
+      "baseline": {
+        "mag_rmse": 2.030185975645938,
+        "mag_mae": 1.5264428557847556,
+        "time_hour_rmse": 19.347349141094266,
+        "time_hour_mae": 13.10294646605097,
+        "time_hour_asymmetric_rmse": 23.10737899005952,
+        "time_hour_hit_rate": 0.7831847133757962
+      },
+      "xgboost": {
+        "mag_rmse": 2.01640538913019,
+        "mag_mae": 1.5183902421216262,
+        "time_hour_rmse": 18.509389353362575,
+        "time_hour_mae": 11.505916403645797,
+        "time_hour_asymmetric_rmse": 22.10619774740041,
+        "time_hour_hit_rate": 0.782420382165605
+      }
+    }
+  }
+}

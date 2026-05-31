@@ -1,0 +1,7 @@
+{
+  "config": "both_500_lr003",
+  "score_proxy": 1.35476137012588,
+  "mag_rmse": 0.844829542808219,
+  "time_hour_asymmetric_rmse": 12.238363855623867,
+  "time_hour_hit_rate": 0.7859023354564756
+}

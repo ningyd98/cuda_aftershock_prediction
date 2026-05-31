@@ -1,0 +1,148 @@
+{
+  "created_at": "2026-05-21T01:17:12.702279+00:00",
+  "artifact_type": "qualification_legal_fusion_v1",
+  "data": "/home/ningyd/CodingSpace/aftershock_qualification_train/data/processed/qualification_features.csv",
+  "models": [
+    "baseline",
+    "xgboost"
+  ],
+  "extreme_margin": 1.2,
+  "extreme_weight": 4.0,
+  "window_metrics": {
+    "T1": {
+      "models": {
+        "baseline": {
+          "mag_rmse": 2.333458369846646,
+          "mag_mae": 2.01089218706702,
+          "time_hour_rmse": 6.200852216803107,
+          "time_hour_mae": 5.187342969459837,
+          "time_hour_asymmetric_rmse": 5.899612374445551,
+          "time_hour_hit_rate": 0.27070063694267515
+        },
+        "xgboost": {
+          "mag_rmse": 2.3218598024247985,
+          "mag_mae": 2.0498549411672933,
+          "time_hour_rmse": 6.139212314018106,
+          "time_hour_mae": 5.191588940751146,
+          "time_hour_asymmetric_rmse": 5.817370146914361,
+          "time_hour_hit_rate": 0.2484076433121019
+        }
+      },
+      "base_fusion": {
+        "mag_rmse": 2.315254266424343,
+        "mag_mae": 2.0293253450793465,
+        "time_hour_rmse": 6.139212314018106,
+        "time_hour_mae": 5.191588940751146,
+        "time_hour_asymmetric_rmse": 5.817370146914361,
+        "time_hour_hit_rate": 0.2484076433121019
+      },
+      "legal_risk_fusion": {
+        "mag_rmse": 2.458446727620323,
+        "mag_mae": 1.8903562227487818,
+        "time_hour_rmse": 6.449832233140103,
+        "time_hour_mae": 5.552562020633121,
+        "time_hour_asymmetric_rmse": 5.82757650049104,
+        "time_hour_hit_rate": 0.20414012738853504,
+        "extreme_mag_mae": 1.1935735519312252,
+        "extreme_count": 875
+      },
+      "risk": {
+        "positive_rate": 0.2786624203821656,
+        "prob_mean": 0.38353823591685,
+        "precision_at_0_5": 0.3835616438356164,
+        "recall_at_0_5": 0.384,
+        "roc_auc": 0.5996611794386629
+      }
+    },
+    "T2": {
+      "models": {
+        "baseline": {
+          "mag_rmse": 1.9399437867439546,
+          "mag_mae": 1.4810383176500854,
+          "time_hour_rmse": 9.702718692766236,
+          "time_hour_mae": 6.459007418725446,
+          "time_hour_asymmetric_rmse": 9.694541785178794,
+          "time_hour_hit_rate": 0.7114649681528662
+        },
+        "xgboost": {
+          "mag_rmse": 1.9272516026113569,
+          "mag_mae": 1.483028845039665,
+          "time_hour_rmse": 9.532827555674983,
+          "time_hour_mae": 6.095656393961428,
+          "time_hour_asymmetric_rmse": 9.875732963183665,
+          "time_hour_hit_rate": 0.7127388535031847
+        }
+      },
+      "base_fusion": {
+        "mag_rmse": 1.9247427459807982,
+        "mag_mae": 1.4786704216582507,
+        "time_hour_rmse": 9.61726045766886,
+        "time_hour_mae": 6.3116332608393915,
+        "time_hour_asymmetric_rmse": 9.654909785981442,
+        "time_hour_hit_rate": 0.7130573248407643
+      },
+      "legal_risk_fusion": {
+        "mag_rmse": 2.020378940848099,
+        "mag_mae": 1.6960603525211444,
+        "time_hour_rmse": 9.692057382958264,
+        "time_hour_mae": 6.464031552446629,
+        "time_hour_asymmetric_rmse": 9.615085150274508,
+        "time_hour_hit_rate": 0.7130573248407643,
+        "extreme_mag_mae": 1.7811155706390338,
+        "extreme_count": 357
+      },
+      "risk": {
+        "positive_rate": 0.11369426751592357,
+        "prob_mean": 0.2683690217826284,
+        "precision_at_0_5": 0.296969696969697,
+        "recall_at_0_5": 0.4117647058823529,
+        "roc_auc": 0.7117020002395497
+      }
+    },
+    "T3": {
+      "models": {
+        "baseline": {
+          "mag_rmse": 1.977446352885547,
+          "mag_mae": 1.4934030721828244,
+          "time_hour_rmse": 19.33353736067909,
+          "time_hour_mae": 12.663900953924628,
+          "time_hour_asymmetric_rmse": 19.51602139104654,
+          "time_hour_hit_rate": 0.7671974522292994
+        },
+        "xgboost": {
+          "mag_rmse": 1.9598718594730493,
+          "mag_mae": 1.4859267104600624,
+          "time_hour_rmse": 18.992563953391713,
+          "time_hour_mae": 12.097755554827213,
+          "time_hour_asymmetric_rmse": 20.316696266288645,
+          "time_hour_hit_rate": 0.7678343949044586
+        }
+      },
+      "base_fusion": {
+        "mag_rmse": 1.957336437955048,
+        "mag_mae": 1.485374641655783,
+        "time_hour_rmse": 19.16935653936125,
+        "time_hour_mae": 12.415299484906852,
+        "time_hour_asymmetric_rmse": 19.549599150052703,
+        "time_hour_hit_rate": 0.7662420382165606
+      },
+      "legal_risk_fusion": {
+        "mag_rmse": 2.032893883167583,
+        "mag_mae": 1.6812996847002784,
+        "time_hour_rmse": 19.360342000595615,
+        "time_hour_mae": 12.554449135781597,
+        "time_hour_asymmetric_rmse": 19.49822447676839,
+        "time_hour_hit_rate": 0.7703821656050955,
+        "extreme_mag_mae": 2.041751690136238,
+        "extreme_count": 308
+      },
+      "risk": {
+        "positive_rate": 0.0980891719745223,
+        "prob_mean": 0.21745853922483674,
+        "precision_at_0_5": 0.29213483146067415,
+        "recall_at_0_5": 0.33766233766233766,
+        "roc_auc": 0.6957957296940349
+      }
+    }
+  }
+}

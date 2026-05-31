@@ -1,0 +1,197 @@
+{
+  "windows": {
+    "T1": {
+      "mag_model": {
+        "n_estimators": 300,
+        "learning_rate": 0.03,
+        "num_leaves": 31,
+        "min_child_samples": 20,
+        "subsample": 1.0,
+        "colsample_bytree": 0.8,
+        "reg_alpha": 0.01,
+        "reg_lambda": 5.0
+      },
+      "time_model": {
+        "n_estimators": 800,
+        "learning_rate": 0.01,
+        "num_leaves": 63,
+        "min_child_samples": 30,
+        "subsample": 0.9,
+        "colsample_bytree": 0.8,
+        "reg_alpha": 0.0,
+        "reg_lambda": 0.5
+      },
+      "extreme_model": {
+        "extreme_margin": 2.0,
+        "n_estimators": 200,
+        "learning_rate": 0.01,
+        "num_leaves": 15,
+        "subsample": 0.8,
+        "colsample_bytree": 0.9
+      },
+      "postprocessing": {
+        "mag_bias_T1": 0.0,
+        "mag_bias_T2": -0.1,
+        "mag_bias_T3": 0.1,
+        "time_bias_T1": 0.0,
+        "time_bias_T2": 2.0,
+        "time_bias_T3": 12.0,
+        "extreme_prob_threshold": 0.4,
+        "high_risk_mag_quantile_weight": 0.7,
+        "early_time_shift_strength": 0.2,
+        "t1_early_delta_bonus": 0.2
+      },
+      "fusion": {
+        "mag": {
+          "oof_mag_lgbm": 0.32,
+          "oof_mag_xgb": 0.6799999999999999
+        },
+        "time": {
+          "oof_time_bucket_raw": 0.6799149707215122,
+          "oof_time_direct_lgbm_raw": 0.016432287351403292,
+          "oof_time_direct_lgbm_pp": 0.024959121837121196,
+          "oof_time_direct_xgb_raw": 0.045762714803887196,
+          "oof_time_direct_xgb_pp": 0.23293090528607618
+        },
+        "extreme": {
+          "oof_extreme_prob_lgbm": 1.0
+        }
+      }
+    },
+    "T2": {
+      "mag_model": {
+        "n_estimators": 300,
+        "learning_rate": 0.03,
+        "num_leaves": 63,
+        "min_child_samples": 100,
+        "subsample": 0.7,
+        "colsample_bytree": 1.0,
+        "reg_alpha": 0.5,
+        "reg_lambda": 0.0
+      },
+      "time_model": {
+        "n_estimators": 200,
+        "learning_rate": 0.07,
+        "num_leaves": 127,
+        "min_child_samples": 15,
+        "subsample": 0.8,
+        "colsample_bytree": 0.5,
+        "reg_alpha": 0.0,
+        "reg_lambda": 0.5
+      },
+      "extreme_model": {
+        "extreme_margin": 2.0,
+        "n_estimators": 100,
+        "learning_rate": 0.02,
+        "num_leaves": 15,
+        "subsample": 0.8,
+        "colsample_bytree": 0.9
+      },
+      "postprocessing": {
+        "mag_bias_T1": 0.0,
+        "mag_bias_T2": -0.1,
+        "mag_bias_T3": 0.1,
+        "time_bias_T1": 0.0,
+        "time_bias_T2": 2.0,
+        "time_bias_T3": 12.0,
+        "extreme_prob_threshold": 0.4,
+        "high_risk_mag_quantile_weight": 0.7,
+        "early_time_shift_strength": 0.2,
+        "t1_early_delta_bonus": 0.2
+      },
+      "fusion": {
+        "mag": {
+          "oof_mag_lgbm": 0.88,
+          "oof_mag_xgb": 0.12
+        },
+        "time": {
+          "oof_time_bucket_raw": 0.29561096829358946,
+          "oof_time_direct_lgbm_raw": 0.051522916470771514,
+          "oof_time_direct_lgbm_pp": 0.15413470021272097,
+          "oof_time_direct_xgb_raw": 0.031159792645606095,
+          "oof_time_direct_xgb_pp": 0.46757162237731204
+        },
+        "extreme": {
+          "oof_extreme_prob_lgbm": 1.0
+        }
+      }
+    },
+    "T3": {
+      "mag_model": {
+        "n_estimators": 500,
+        "learning_rate": 0.02,
+        "num_leaves": 15,
+        "min_child_samples": 100,
+        "subsample": 0.7,
+        "colsample_bytree": 0.4,
+        "reg_alpha": 1.0,
+        "reg_lambda": 0.5
+      },
+      "time_model": {
+        "n_estimators": 500,
+        "learning_rate": 0.05,
+        "num_leaves": 63,
+        "min_child_samples": 15,
+        "subsample": 0.6,
+        "colsample_bytree": 0.7,
+        "reg_alpha": 0.0,
+        "reg_lambda": 1.0
+      },
+      "extreme_model": {
+        "extreme_margin": 2.0,
+        "n_estimators": 100,
+        "learning_rate": 0.01,
+        "num_leaves": 15,
+        "subsample": 1.0,
+        "colsample_bytree": 0.6
+      },
+      "postprocessing": {
+        "mag_bias_T1": 0.0,
+        "mag_bias_T2": -0.1,
+        "mag_bias_T3": 0.1,
+        "time_bias_T1": 0.0,
+        "time_bias_T2": 2.0,
+        "time_bias_T3": 12.0,
+        "extreme_prob_threshold": 0.4,
+        "high_risk_mag_quantile_weight": 0.7,
+        "early_time_shift_strength": 0.2,
+        "t1_early_delta_bonus": 0.2
+      },
+      "fusion": {
+        "mag": {
+          "oof_mag_lgbm": 0.98,
+          "oof_mag_xgb": 0.020000000000000018
+        },
+        "time": {
+          "oof_time_bucket_raw": 0.4862783953601331,
+          "oof_time_direct_lgbm_raw": 0.0641735677134445,
+          "oof_time_direct_lgbm_pp": 0.1875045390190961,
+          "oof_time_direct_xgb_raw": 0.009147907518010194,
+          "oof_time_direct_xgb_pp": 0.25289559038931614
+        },
+        "extreme": {
+          "oof_extreme_prob_lgbm": 1.0
+        }
+      }
+    }
+  },
+  "global": {
+    "seed": 42,
+    "separate_target_tuning": true,
+    "oof_fusion": true,
+    "dl_enabled": false,
+    "gnn_enabled": false,
+    "version": "decoupled_v2",
+    "pp_best_score": Infinity,
+    "t23_time_mae_guard": {
+      "enabled": true,
+      "max_ratio": 1.3,
+      "baseline_mae": {
+        "T2": 8.605380480126627,
+        "T3": 17.16884448563605
+      },
+      "selected_mae": Infinity
+    }
+  },
+  "postprocessing": {}
+}
